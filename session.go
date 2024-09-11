@@ -1,14 +1,11 @@
 package cookiesession
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -242,14 +239,12 @@ func (m *Manager[T, PtrT]) serializeData(data PtrT) (string, error) {
 		return "", fmt.Errorf("marshaling session data: %v", err)
 	}
 
-	var buf bytes.Buffer
+	cw := getCompressor()
+	defer putCompressor(cw)
 
-	jw := gzip.NewWriter(&buf)
-	if _, err := jw.Write(b); err != nil {
-		return "", fmt.Errorf("gizp session data: %w", err)
-	}
-	if err := jw.Close(); err != nil {
-		return "", fmt.Errorf("closing gzip writer: %w", err)
+	cb, err := cw.Compress(b)
+	if err != nil {
+		return "", fmt.Errorf("compressing data: %w", err)
 	}
 
 	aead, err := aead.New(m.handleFn())
@@ -257,7 +252,7 @@ func (m *Manager[T, PtrT]) serializeData(data PtrT) (string, error) {
 		return "", fmt.Errorf("getting aead: %w", err)
 	}
 
-	ed, err := aead.Encrypt(buf.Bytes(), m.associatedData())
+	ed, err := aead.Encrypt(cb, m.associatedData())
 	if err != nil {
 		return "", fmt.Errorf("encryption failed: %w", err)
 	}
@@ -287,16 +282,12 @@ func (m *Manager[T, PtrT]) deserializeData(data string) (PtrT, error) {
 		return nil, fmt.Errorf("decrypting: %w", err)
 	}
 
-	gr, err := gzip.NewReader(bytes.NewReader(plaintext))
+	cr := getDecompressor()
+	defer putDecompressor(cr)
+
+	b, err := cr.Decompress(plaintext)
 	if err != nil {
-		return nil, fmt.Errorf("creating gzip reader: %w", err)
-	}
-	b, err := io.ReadAll(gr)
-	if err != nil {
-		return nil, fmt.Errorf("ungz data: %v", err)
-	}
-	if err := gr.Close(); err != nil {
-		return nil, fmt.Errorf("closing gzip reader: %w", err)
+		return nil, fmt.Errorf("decompressing data: %w", err)
 	}
 
 	if pp, isProto := any(ret).(proto.Message); isProto {
