@@ -1,4 +1,4 @@
-package cookiesession
+package session
 
 import (
 	"context"

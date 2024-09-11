@@ -1,4 +1,4 @@
-package cookiesession
+package session
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	sessionpb "github.com/lstoll/cookiesession/internal/proto"
+	sessionpb "github.com/lstoll/session/internal/proto"
 	"google.golang.org/protobuf/proto"
 )
 

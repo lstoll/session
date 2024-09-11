@@ -1,4 +1,4 @@
-package cookiesession
+package session
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	sessionpb "github.com/lstoll/cookiesession/internal/proto"
+	sessionpb "github.com/lstoll/session/internal/proto"
 	"github.com/tink-crypto/tink-go/v2/aead"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 	"google.golang.org/protobuf/types/known/timestamppb"
