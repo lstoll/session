@@ -22,8 +22,6 @@ import (
 // serialization without breaking existing data.
 const cookieMagic = "EC1."
 
-type sessCtxKey struct{ sessName string }
-
 // DeadlineSession is an optional interface a session data type can implement.
 // If it does, the session will not be considered valid after this date and will
 // be discarded if it's seen. This is useful because the cookie max age only
@@ -65,21 +63,6 @@ type KeysetHandleFunc func() *keyset.Handle
 // changes.
 func StaticKeysetHandle(h *keyset.Handle) KeysetHandleFunc {
 	return func() *keyset.Handle { return h }
-}
-
-// Manager is used to wrap a http Handler to manage fetching/setting sessions
-// during the HTTP request lifecycle, as well as retrieving sessions inside a
-// handler.
-//
-// The session data type will be JSON serialized, compressed, and AES-GCM
-// encrypted. This must fit within 4kb post-processing to fit within a cookie,
-// no automatic sharding is supported.
-//
-// It should be created via the New function.
-type Manager[T any, PtrT interface{ *T }] struct {
-	sessionName string
-	handleFn    KeysetHandleFunc
-	opts        Options
 }
 
 // Options are used to customize the Manager. Most options pass through to the
@@ -128,25 +111,43 @@ func (o *Options) newCookie(name, value string) *http.Cookie {
 	}
 }
 
+// Manager is used to wrap a http Handler to manage fetching/setting sessions
+// during the HTTP request lifecycle, as well as retrieving sessions inside a
+// handler.
+//
+// The session data type will be JSON serialized, compressed, and AES-GCM
+// encrypted. This must fit within 4kb post-processing to fit within a cookie,
+// no automatic sharding is supported.
+//
+// It should be created via the New function.
+type Manager struct {
+	// sessionName string
+	// handleFn    KeysetHandleFunc
+	// opts        Options
+
+	loadFunc func(r *http.Request) ([]byte, error)
+	saveFunc func(w http.ResponseWriter, r *http.Request, d []byte) error
+}
+
 // New create a new instance of the session Manager. It should be instantiated
 // with a non-pointer type to the data structure that represents the session,
 // e.g `New[mySessionStruct](...)`.
-func New[T any, PtrT interface{ *T }](sessionName string, handleFn KeysetHandleFunc, opts Options) (*Manager[T, PtrT], error) {
-	if opts.ErrorHandler == nil {
-		opts.ErrorHandler = defaultErrorHandler
-	}
-	return &Manager[T, PtrT]{
-		sessionName: sessionName,
-		handleFn:    handleFn,
-		opts:        opts,
-	}, nil
-}
+// func New[T any, PtrT interface{ *T }](sessionName string, handleFn KeysetHandleFunc, opts Options) (*Manager[T, PtrT], error) {
+// 	if opts.ErrorHandler == nil {
+// 		opts.ErrorHandler = defaultErrorHandler
+// 	}
+// 	return &Manager[T, PtrT]{
+// 		sessionName: sessionName,
+// 		handleFn:    handleFn,
+// 		opts:        opts,
+// 	}, nil
+// }
 
 // Wrap should be called with a HTTP handler that needs to have sessions inside
 // it managed. Sessions will not be accessible outside of this wrapper. The
 // session will be persisted on the first call to write/writeheader, it will no
 // longer be modifiable after that.
-func (m *Manager[T, PtrT]) Wrap(next http.Handler) http.Handler {
+func (m *Manager) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sd, loaded, delete, err := m.loadSession(r)
 		if err != nil && m.opts.FailOnSessionLoadError {
@@ -162,6 +163,9 @@ func (m *Manager[T, PtrT]) Wrap(next http.Handler) http.Handler {
 			data:   sd,
 			delete: delete,
 		}
+
+		r = r.WithContext(context.WithValue(r.Context(), mgrCtxKey{}, m))
+		r = r.WithContext(context.WithValue(r.Context(), mgrCtxKey{}, m))
 
 		r = r.WithContext(context.WithValue(r.Context(), sessCtxKey{sessName: m.sessionName}, sess))
 		hw := &hookRW{
