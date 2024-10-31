@@ -1,6 +1,7 @@
 package session
 
 import (
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,15 @@ import (
 func TestSessionStore(t *testing.T) {
 	for name, store := range map[string]Store{
 		"memory-kv": NewMemoryStore(),
+		"cookie": &CookieStore{
+			AEAD: &AESGCMAEAD{
+				encryptionKey: genAESKey(),
+			},
+			CookieTemplate: &http.Cookie{
+				Name: "cookie-session",
+			},
+			Marshaler: DefaultMarshaler,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			mux := http.NewServeMux()
@@ -184,4 +194,12 @@ func must[T any](v T, err error) T {
 		panic(fmt.Sprintf("error: %v", err))
 	}
 	return v
+}
+
+func genAESKey() []byte {
+	k := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, k); err != nil {
+		panic(err)
+	}
+	return k
 }
