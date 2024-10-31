@@ -2,11 +2,15 @@ package session
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
+
+const defaultMaxAge = 30 * 24 * time.Hour
 
 const (
 	cookieMagic           = "EU1"
@@ -70,8 +74,11 @@ func (c *CookieStore) Get(r *http.Request, into any) (loaded bool, _ error) {
 		return false, fmt.Errorf("decrypting cookie: %w", err)
 	}
 
-	// TODO - need to stamp some kind of expiry in to here, to avoid the encrypted
-	// contents being valid forever
+	expiresAt := time.Unix(int64(binary.LittleEndian.Uint64(db[:8])), 0)
+	if expiresAt.Before(time.Now()) {
+		return false, fmt.Errorf("cookie expired at %s", expiresAt)
+	}
+	db = db[8:]
 
 	if err := c.Marshaler.Unmarshal(db, into); err != nil {
 		return false, fmt.Errorf("unmarshaling cookie: %w", err)
@@ -89,6 +96,15 @@ func (c *CookieStore) Put(w http.ResponseWriter, r *http.Request, value any) err
 	if err != nil {
 		return fmt.Errorf("marshaling cookie:")
 	}
+
+	// prepend an expiry time, so we can avoid things living forever.
+	expiresIn := time.Duration(c.CookieTemplate.MaxAge) * time.Second
+	if expiresIn == 0 {
+		expiresIn = defaultMaxAge
+	}
+	b := make([]byte, 8)
+	binary.LittleEndian.PutUint64(b, uint64(time.Now().Add(expiresIn).Unix()))
+	cb = append(b, cb...)
 
 	magic := cookieMagic
 	if len(cb) > compressThreshold {
