@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mathrand "math/rand/v2"
 	"strings"
 	"sync"
 	"testing"
@@ -121,4 +122,14 @@ func BenchmarkCompression(b *testing.B) {
 			b.SetBytes(int64(len(data)))
 		}
 	})
+}
+
+var randChars = []rune(`abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567890`)
+
+func randStr(n int) string {
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = randChars[mathrand.IntN(len(randChars))]
+	}
+	return string(b)
 }
