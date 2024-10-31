@@ -1,22 +1,127 @@
 package session
 
-import (
-	"context"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"log/slog"
-	"net/http"
-	"strings"
-	"sync"
-	"time"
+/*
 
-	"github.com/tink-crypto/tink-go/v2/aead"
-	"github.com/tink-crypto/tink-go/v2/keyset"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
-)
+type ManagerOpts struct {
+	ErrorHandler    func(w http.ResponseWriter, r *http.Request, err error)
+	FailOnLoadError bool
+}
+
+type Manager[T Sessionable] struct {
+	init  func() T
+	name  string
+	store Store
+	opts  *ManagerOpts
+}
+
+func NewManager[T any, PT interface {
+	Sessionable
+	*T
+}](store Store, name string) *Manager[PT] {
+	// TODO - validate name
+	return &Manager[PT]{
+		init: func() PT {
+			return PT(new(T))
+		},
+	}
+}
+
+func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sd := m.init()
+
+		sess, err := m.store.Load(r.Context(), r)
+
+		if err != nil && m.opts.FailOnLoadError {
+			m.opts.ErrorHandler(w, r, err)
+			return
+		}
+		if !loaded {
+			// start with a fresh one, in case the store partially loads data
+			sd = m.init()
+		}
+
+		// TODO - think about the session ID / session name deal.
+		//
+		// e.g - one session ID, multiple types? How does rotation work in that
+		// case? Does the session ID concept need to be hidden behind the store,
+		// and it loads/ saves everything? It probably makes sense at the store
+		// level. Get includes the name but not id, the store correlates that.
+		// Need to think how reset works.
+		//
+		// Also think about the store/manager interaction. Is one manager
+		// managing a whole session, or is it managing multiple data types under
+		// one session? If the latter it's a bit complicated, if it's the former
+		// maybe easier but need to think about how reset works - how do we
+		// trigger a "delete" then "re-create"
+		//
+		// Maybe store's get returns a context. Store can track whatever info it
+		// wants in there, and receive it passed in to the put or delete
+		// methods. that'll let it track IDs or whatever. Then do one manager ==
+		// one session, and nothing operates across them all.
+
+		sess := &sessCtx[T]{}
+		if sd.Valid() {
+			sess.data = sd
+		} else {
+			sess.delete = true
+		}
+
+		r = r.WithContext(context.WithValue(r.Context(), sessCtxKey{name: m.name}, sess))
+
+		hw := &hookRW{
+			ResponseWriter: w,
+			hook: func(w http.ResponseWriter) bool {
+				if err := m.store.PutSession(r.Context(), w, r, m.name, "TODO", sess.data); err != nil {
+					m.opts.ErrorHandler(w, r, err)
+					return false
+				}
+				return true
+			},
+		}
+
+		next.ServeHTTP(hw, r)
+
+		// if the handler doesn't write anything, make sure we fire the hook
+		// anyway.
+		hw.hookOnce.Do(func() {
+			hw.hook(hw.ResponseWriter)
+		})
+	})
+}
+
+func (s *Manager[T]) Get(ctx context.Context) (_ T, exist bool) {
+	sessCtx, ok := ctx.Value(sessCtxKey{}).(*sessCtx)
+	if !ok {
+		panic("context contained no or invalid session")
+	}
+
+	// TODO we actually need to try and load here
+	d, ok := sessCtx.sessions[PT(new(T)).Type()]
+	if !ok {
+		return PT(new(T)), false, nil
+	}
+
+	return d.data.(PT), true, nil
+}
+
+func Save[T any, PT Sessionable[T]](ctx context.Context, sess PT) {
+
+}
+
+func Delete[T any, PT Sessionable[T]](ctx context.Context) {
+
+}
+
+func Reset[T any, PT Sessionable[T]](ctx context.Context, sess PT) {
+
+}
+
+func getSessMgr(ctx context.Context) (*sessCtx, *Manager) {
+	return nil, nil
+}
+
+/*
 
 // cookieMagic prefixes the data, to give us the option in future to evolve the
 // serialization without breaking existing data.
@@ -395,3 +500,5 @@ func defaultErrorHandler(err error, w http.ResponseWriter, r *http.Request) {
 	slog.ErrorContext(r.Context(), "error occured in cookie session wrapper", slog.String("err", err.Error()))
 	http.Error(w, "Internal Error", http.StatusInternalServerError)
 }
+
+*/

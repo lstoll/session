@@ -1,14 +1,8 @@
 package session
 
-type sessCtxKey struct{}
+type sessCtxKey struct{ name string }
 
-type mgrCtxKey struct{}
-
-type sessCtx struct {
-	sessions map[string]*sessCtxSess
-}
-
-type sessCtxSess struct {
+type sessCtx[T Sessionable] struct {
 	// data is the actuall session data, untyped
 	data   any
 	delete bool

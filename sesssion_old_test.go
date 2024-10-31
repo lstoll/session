@@ -1,19 +1,6 @@
 package session
 
-import (
-	"context"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"testing"
-	"time"
-
-	sessionpb "github.com/lstoll/session/internal/proto"
-	"github.com/tink-crypto/tink-go/v2/aead"
-	"github.com/tink-crypto/tink-go/v2/keyset"
-	"google.golang.org/protobuf/types/known/timestamppb"
-)
+/*
 
 type testSession struct {
 	KV map[string]string `json:"kv"`
@@ -343,3 +330,5 @@ var _ DeadlineSession = (*testDeadlineSession)(nil)
 func (t *testDeadlineSession) NotAfter() time.Time {
 	return t.EndDate
 }
+
+*/
