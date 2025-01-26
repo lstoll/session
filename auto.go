@@ -29,11 +29,11 @@ type Auto[T Sessionable] struct {
 func (a *Auto[T]) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sessData := DefaultMarshaler.NewMap()
-		_, err := a.Store.Get(r, &sessData)
+		/*_, err := a.Store.Get(r, &sessData)
 		if err != nil {
 			// m.opts.ErrorHandler(w, r, err)
 			return
-		}
+		}*/
 
 		sess := a.newEmpty()
 		if err := sessData.Unmarshal(sess.SessionName(), sess); err != nil {

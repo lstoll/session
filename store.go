@@ -3,9 +3,9 @@ package session
 import (
 	"crypto/rand"
 	"encoding/base32"
-	"errors"
 	"io"
 	"net/http"
+	"time"
 )
 
 var DefaultCookieTemplate = &http.Cookie{
@@ -14,23 +14,15 @@ var DefaultCookieTemplate = &http.Cookie{
 	SameSite: http.SameSiteLaxMode,
 }
 
-var ErrNotFound = errors.New("session not found")
+// var ErrNotFound = errors.New("session not found")
 
 type Store interface {
-	// Get loads and unmarshals the session in to into
-	Get(r *http.Request, into any) (loaded bool, _ error)
+	// Get loads the encoded data for a session from the request. If there is no
+	// session data, it should return nil
+	Get(r *http.Request) ([]byte, error)
 	// Put saves a session. If a session exists it should be updated, otherwise
 	// a new session should be created.
-	Put(w http.ResponseWriter, r *http.Request, value any) error
-	// Delete deletes the session.
-	Delete(w http.ResponseWriter, r *http.Request) error
-}
-
-type Session interface {
-	Get(r *http.Request, into any) (loaded bool, _ error)
-	// Put saves a session. If a session exists it should be updated, otherwise
-	// a new session should be created.
-	Put(w http.ResponseWriter, r *http.Request, value any) error
+	Put(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error
 	// Delete deletes the session.
 	Delete(w http.ResponseWriter, r *http.Request) error
 }

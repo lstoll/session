@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 type KV interface {
@@ -14,68 +15,54 @@ type KV interface {
 }
 
 type KVStore struct {
-	KV             KV
-	CookieTemplate *http.Cookie
-	Marshaler      Marshaler
+	KV         KV
+	CookieOpts *CookieOpts
 }
 
 // Get loads and unmarshals the session in to into
-func (k *KVStore) Get(r *http.Request, into any) (loaded bool, _ error) {
-	if into == nil {
-		return false, errors.New("into can not be nil")
-	}
-
+func (k *KVStore) Get(r *http.Request) ([]byte, error) {
 	kvSess := k.getOrInitKVSess(r)
 
-	// differentiate deleted vs. emptied
+	// TODO(lstoll) differentiate deleted vs. emptied
 
 	if kvSess.id == "" {
 		// no active session loaded, try and fetch from cookie
 		cookie, err := r.Cookie(k.cookieName())
 		if err != nil {
 			if errors.Is(err, http.ErrNoCookie) {
-				kvSess.id = newSID()
-				return false, nil
+				// kvSess.id = newSID()
+				return nil, nil
 			}
-			return false, fmt.Errorf("getting cookie %s: %w", k.cookieName(), err)
+			return nil, fmt.Errorf("getting cookie %s: %w", k.cookieName(), err)
 		}
 		kvSess.id = cookie.Value
 	}
 
 	b, ok, err := k.KV.Get(r.Context(), kvSess.id)
 	if err != nil {
-		return false, fmt.Errorf("loading from KV: %w", err)
+		return nil, fmt.Errorf("loading from KV: %w", err)
 	}
 	if !ok {
-		return false, nil
+		return nil, nil
 	}
 
-	if err := getOrDefault(k.Marshaler, DefaultMarshaler).Unmarshal(b, into); err != nil {
-		return false, fmt.Errorf("unmarshaling: %w", err)
-	}
-
-	return true, nil
+	return b, nil
 }
 
 // Put saves a session. If a session exists it should be updated, otherwise
 // a new session should be created.
-func (k *KVStore) Put(w http.ResponseWriter, r *http.Request, value any) error {
-	b, err := getOrDefault(k.Marshaler, DefaultMarshaler).Marshal(value)
-	if err != nil {
-		return fmt.Errorf("marshaling: %w", err)
-	}
-
+func (k *KVStore) Put(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
 	kvSess := k.getOrInitKVSess(r)
 	if kvSess.id == "" {
 		kvSess.id = newSID()
 	}
 
-	if err := k.KV.Set(r.Context(), kvSess.id, b); err != nil {
+	if err := k.KV.Set(r.Context(), kvSess.id, data); err != nil {
 		return fmt.Errorf("putting session data: %w", err)
 	}
 
 	c := k.newCookie()
-	c.Name = k.cookieName()
+	c.Expires = expiresAt
 	c.Value = kvSess.id
 	http.SetCookie(w, c)
 
@@ -103,26 +90,30 @@ func (k *KVStore) Delete(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (k *KVStore) cookieName() string {
-	if k.CookieTemplate != nil && k.CookieTemplate.Name != "" {
-		return k.CookieTemplate.Name
+	if k.CookieOpts != nil && k.CookieOpts.Name != "" {
+		return k.CookieOpts.Name
 	}
 	return "session-id"
 }
 
 func (k *KVStore) newCookie() *http.Cookie {
-	cp := getOrDefault(k.CookieTemplate, DefaultCookieTemplate)
-	nc := *cp
-	return &nc
+	c := &http.Cookie{
+		Name: k.cookieName(),
+	}
+	if k.CookieOpts == nil || !k.CookieOpts.Insecure {
+		c.Secure = true
+	}
+	return c
 }
 
 func (k *KVStore) getOrInitKVSess(r *http.Request) *kvSession {
-	kvSess, ok := r.Context().Value(kvSessCtxKey{}).(*kvSession)
+	kvSess, ok := r.Context().Value(kvSessCtxKey{inst: k}).(*kvSession)
 	if ok {
 		return kvSess
 	}
 
 	kvSess = &kvSession{}
-	*r = *r.WithContext(context.WithValue(r.Context(), kvSessCtxKey{}, kvSess))
+	*r = *r.WithContext(context.WithValue(r.Context(), kvSessCtxKey{inst: k}, kvSess))
 
 	return kvSess
 }
@@ -135,9 +126,9 @@ func getOrDefault[T comparable](check T, defaulted T) T {
 	return defaulted
 }
 
-type kvSessCtxKey struct{}
+type kvSessCtxKey struct{ inst *KVStore }
 
-// kvSession tracks information across the session.
+// kvSession tracks information about the session across the request's context
 type kvSession struct {
 	id string
 }

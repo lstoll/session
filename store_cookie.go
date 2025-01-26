@@ -24,6 +24,13 @@ const (
 
 var cookieValueEncoding = base64.RawURLEncoding
 
+// CookieOpts can be used to customize the cookie used for tracking sessions.
+type CookieOpts struct {
+	Name     string
+	Path     string
+	Insecure bool
+}
+
 type CookieStore struct {
 	AEAD                AEAD
 	CookieTemplate      *http.Cookie

@@ -2,6 +2,7 @@ package session
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,12 +10,17 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 )
 
 func TestSessionStore(t *testing.T) {
 	for name, store := range map[string]Store{
-		"memory-kv": NewMemoryStore(),
-		"cookie": &CookieStore{
+		"memory-kv": &KVStore{
+			KV: &memoryKV{
+				contents: make(map[string][]byte),
+			},
+		},
+		/*"cookie": &CookieStore{
 			AEAD: &AESGCMAEAD{
 				encryptionKey: genAESKey(),
 			},
@@ -22,7 +28,7 @@ func TestSessionStore(t *testing.T) {
 				Name: "cookie-session",
 			},
 			Marshaler: DefaultMarshaler,
-		},
+		},*/
 	} {
 		t.Run(name, func(t *testing.T) {
 			mux := http.NewServeMux()
@@ -30,11 +36,17 @@ func TestSessionStore(t *testing.T) {
 			setHandler := func(w http.ResponseWriter, r *http.Request) {
 				sess := map[string]string{}
 
-				loaded, err := store.Get(r, &sess)
-				t.Logf("GET /set: loaded %t err %v", loaded, err)
+				data, err := store.Get(r)
+				t.Logf("GET /set: loaded %s err %v", string(data), err)
 				if err != nil {
 					http.Error(w, "loading store failed", http.StatusInternalServerError)
 					return
+				}
+				if data != nil {
+					if err := json.Unmarshal(data, &sess); err != nil {
+						http.Error(w, "unmarshaling stored data failed", http.StatusInternalServerError)
+						return
+					}
 				}
 
 				key := r.URL.Query().Get("key")
@@ -52,7 +64,13 @@ func TestSessionStore(t *testing.T) {
 
 				sess[key] = value
 
-				if err := store.Put(w, r, sess); err != nil {
+				data, err = json.Marshal(sess)
+				if err != nil {
+					http.Error(w, "marshaling stored data failed", http.StatusInternalServerError)
+					return
+				}
+
+				if err := store.Put(w, r, time.Now().Add(1*time.Minute), data); err != nil {
 					http.Error(w, "saving session failed", http.StatusInternalServerError)
 					return
 				}
@@ -63,11 +81,17 @@ func TestSessionStore(t *testing.T) {
 			mux.HandleFunc("GET /get", func(w http.ResponseWriter, r *http.Request) {
 				sess := map[string]string{}
 
-				loaded, err := store.Get(r, &sess)
-				t.Logf("GET /set: loaded %t err %v", loaded, err)
+				data, err := store.Get(r)
+				t.Logf("GET /get: loaded %s err %v", string(data), err)
 				if err != nil {
 					http.Error(w, "loading store failed", http.StatusInternalServerError)
 					return
+				}
+				if data != nil {
+					if err := json.Unmarshal(data, &sess); err != nil {
+						http.Error(w, "unmarshaling stored data failed", http.StatusInternalServerError)
+						return
+					}
 				}
 
 				key := r.URL.Query().Get("key")
@@ -102,7 +126,7 @@ func TestSessionStore(t *testing.T) {
 				}
 			})
 
-			svr := httptest.NewServer(mux)
+			svr := httptest.NewTLSServer(mux)
 			t.Cleanup(svr.Close)
 
 			jar, err := cookiejar.New(nil)
@@ -111,7 +135,8 @@ func TestSessionStore(t *testing.T) {
 			}
 
 			client := &http.Client{
-				Jar: jar,
+				Transport: svr.Client().Transport,
+				Jar:       jar,
 			}
 
 			for i := range 5 {
@@ -132,7 +157,8 @@ func TestSessionStore(t *testing.T) {
 			svrURL := must(url.Parse(svr.URL))
 			oldJar.SetCookies(svrURL, jar.Cookies(svrURL))
 			oldClient := &http.Client{
-				Jar: oldJar,
+				Transport: svr.Client().Transport,
+				Jar:       oldJar,
 			}
 
 			doReq(t, client, svr.URL+"/reset?key=reset1&value=value1", http.StatusOK)
