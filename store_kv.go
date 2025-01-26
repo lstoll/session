@@ -73,8 +73,14 @@ func (k *KVStore) Put(w http.ResponseWriter, r *http.Request, expiresAt time.Tim
 func (k *KVStore) Delete(w http.ResponseWriter, r *http.Request) error {
 	kvSess := k.getOrInitKVSess(r)
 	if kvSess.id == "" {
-		kvSess.id = newSID()
+		// no session ID to delete
+		return nil
 	}
+
+	if err := k.KV.Delete(r.Context(), kvSess.id); err != nil {
+		return fmt.Errorf("deleting session %s from store: %w", kvSess.id, err)
+	}
+
 	// always clear the cookie
 	dc := k.newCookie()
 	dc.Name = k.cookieName()

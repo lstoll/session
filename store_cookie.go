@@ -1,14 +1,13 @@
 package session
 
-import (
-	"encoding/base64"
-	"encoding/binary"
-	"errors"
-	"fmt"
-	"net/http"
-	"strings"
-	"time"
-)
+// CookieOpts can be used to customize the cookie used for tracking sessions.
+type CookieOpts struct {
+	Name     string
+	Path     string
+	Insecure bool
+}
+
+/* TODO - update to new store interface
 
 const defaultMaxAge = 30 * 24 * time.Hour
 
@@ -32,9 +31,9 @@ type CookieOpts struct {
 }
 
 type CookieStore struct {
-	AEAD                AEAD
-	CookieTemplate      *http.Cookie
-	Marshaler           Marshaler
+	AEAD           AEAD
+	CookieTemplate *http.Cookie
+	// Marshaler           Marshaler
 	CompressionDisabled bool
 }
 
@@ -103,6 +102,7 @@ func (c *CookieStore) Put(w http.ResponseWriter, r *http.Request, value any) err
 	if err != nil {
 		return fmt.Errorf("marshaling cookie:")
 	}
+	var cb []byte
 
 	// prepend an expiry time, so we can avoid things living forever.
 	expiresIn := time.Duration(c.CookieTemplate.MaxAge) * time.Second
@@ -157,3 +157,4 @@ func (c *CookieStore) newCookie() *http.Cookie {
 	nc := *cp
 	return &nc
 }
+*/

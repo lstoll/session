@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -21,8 +22,50 @@ type codec interface {
 
 var _ codec = (*protoCodec)(nil)
 
-type protoCodec struct {
+type jsonSession struct {
+	Data      json.RawMessage `json:"data"`
+	CreatedAt time.Time       `json:"createdAt"`
 }
+
+var _ codec = (*jsonCodec)(nil)
+
+type jsonCodec struct{}
+
+func (p *jsonCodec) Encode(data any, md *sessionMetadata) ([]byte, error) {
+	bb, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling data: %w", err)
+	}
+
+	js := jsonSession{
+		Data:      bb,
+		CreatedAt: md.CreatedAt,
+	}
+
+	sb, err := json.Marshal(&js)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling session data: %w", err)
+	}
+
+	return sb, err
+}
+
+func (p *jsonCodec) Decode(data []byte, into any) (*sessionMetadata, error) {
+	var js *jsonSession
+	if err := json.Unmarshal(data, &js); err != nil {
+		return nil, fmt.Errorf("unmarshaling session data: %w", err)
+	}
+
+	if err := json.Unmarshal(js.Data, into); err != nil {
+		return nil, fmt.Errorf("unmarshaling data: %w", err)
+	}
+
+	return &sessionMetadata{
+		CreatedAt: js.CreatedAt,
+	}, nil
+}
+
+type protoCodec struct{}
 
 func (p *protoCodec) Encode(data any, md *sessionMetadata) ([]byte, error) {
 	datapb, ok := data.(proto.Message)

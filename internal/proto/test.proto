@@ -1,14 +1,12 @@
-syntax = "proto3";
+edition = "2023";
 
-package lstoll.sessions.test;
+package test;
+
+import "google/protobuf/go_features.proto";
+
+option features.(pb.go).api_level = API_OPAQUE;
 option go_package = "github.com/lstoll/cookiesession/internal/testpb";
 
-import "google/protobuf/any.proto";
-
 message Session {
-  string message = 1;
-}
-
-message SessionMap {
-    map<string, google.protobuf.Any> data = 1;
+  map<string, string> map = 1;
 }
