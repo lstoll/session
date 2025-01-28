@@ -31,13 +31,13 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("Cookie Manager, JSON", func(t *testing.T) {
-		mgr := NewCookieManager[jsonTestSession](&AESGCMAEAD{
+		mgr := NewCookieManager[jsonTestSession](&aesGCMAEAD{
 			encryptionKey: genAESKey(),
 		})
 		runE2ETest(t, mgr)
 	})
 	t.Run("Cookie Manager, Protobuf", func(t *testing.T) {
-		mgr := NewCookieManager[testpb.Session](&AESGCMAEAD{
+		mgr := NewCookieManager[testpb.Session](&aesGCMAEAD{
 			encryptionKey: genAESKey(),
 		})
 		runE2ETest(t, mgr)
@@ -178,7 +178,6 @@ func runE2ETest[PtrT codecAccessor](t testing.TB, mgr tmanager[PtrT]) {
 
 		// this should fail, as the old session should no longer be accessible under
 		// this ID.
-		// TODO - won't work for cookies though.
 		doReq(t, oldClient, svr.URL+"/get?key=test1", http.StatusNotFound)
 
 		// clear it, and make sure it doesn't work
@@ -187,18 +186,6 @@ func runE2ETest[PtrT codecAccessor](t testing.TB, mgr tmanager[PtrT]) {
 			doReq(t, c, svr.URL+"/get?key=test1", http.StatusNotFound)
 			doReq(t, c, svr.URL+"/get?key=reset1", http.StatusNotFound)
 		}
-	}
-}
-
-func assertNoDuplicateCookies(t *testing.T, cookies []*http.Cookie) {
-	t.Helper()
-
-	seen := make(map[string]struct{})
-	for _, cookie := range cookies {
-		if _, exists := seen[cookie.Name]; exists {
-			t.Errorf("cookie %s has multiple set's", cookie.Name)
-		}
-		seen[cookie.Name] = struct{}{}
 	}
 }
 
@@ -222,10 +209,6 @@ func doReq(t testing.TB, client *http.Client, url string, wantStatus int) string
 		t.Logf("body: %s", string(bb))
 		t.Fatalf("non-%d response status: %d", wantStatus, resp.StatusCode)
 	}
-	// TODO - check how much of a problem this is. It's likely a delete then
-	// create, one should be expiring and a new one should be set. It's hard to
-	// avoid this though.
-	// assertNoDuplicateCookies(t, resp.Cookies())
 	return string(bb)
 }
 

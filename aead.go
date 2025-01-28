@@ -20,32 +20,32 @@ type AEAD interface {
 	Decrypt(ciphertext, associatedData []byte) ([]byte, error)
 }
 
-// AESGCMAEAD is a implementation of the AEAD interface cookies are secured
+// aesGCMAEAD is a implementation of the AEAD interface cookies are secured
 // with, that uses AES-GCM with a random nonce. A single key should not be used
 // for more than 4 billion encryptions. It is reccomended that tink with an
 // automated key rotation is used, this is provided for simple use cases.
-type AESGCMAEAD struct {
+type aesGCMAEAD struct {
 	encryptionKey  []byte
 	decryptionKeys [][]byte
 }
 
-// NewAESGCMAEAD constructs an AESGCMAEAD. The keys must be either 16, 24 or 32
+// newAESGCMAEAD constructs an AESGCMAEAD. The keys must be either 16, 24 or 32
 // bytes. The encryption key is used as the primary encrypt/decrypt key.
 // Additional decryption-only keys can be provided, to enable key rotation.
-func NewAESGCMAEAD(encryptionKey []byte, additionalDecryptionKeys [][]byte) (AEAD, error) {
+func newAESGCMAEAD(encryptionKey []byte, additionalDecryptionKeys [][]byte) (AEAD, error) {
 	for _, k := range append([][]byte{encryptionKey}, additionalDecryptionKeys...) {
 		if len(k) != 16 && len(k) != 24 && len(k) != 32 {
 			return nil, errors.New("keys must be 16, 24, or 32 bytes")
 		}
 	}
 
-	return &AESGCMAEAD{
+	return &aesGCMAEAD{
 		encryptionKey:  encryptionKey,
 		decryptionKeys: additionalDecryptionKeys,
 	}, nil
 }
 
-func (a *AESGCMAEAD) Encrypt(plaintext, associatedData []byte) ([]byte, error) {
+func (a *aesGCMAEAD) Encrypt(plaintext, associatedData []byte) ([]byte, error) {
 	block, err := aes.NewCipher(a.encryptionKey)
 	if err != nil {
 		return nil, fmt.Errorf("creating AES cipher: %w", err)
@@ -63,7 +63,7 @@ func (a *AESGCMAEAD) Encrypt(plaintext, associatedData []byte) ([]byte, error) {
 	return append(nonce, aesgcm.Seal(nil, nonce, plaintext, associatedData)...), nil
 }
 
-func (a *AESGCMAEAD) Decrypt(ciphertext, associatedData []byte) ([]byte, error) {
+func (a *aesGCMAEAD) Decrypt(ciphertext, associatedData []byte) ([]byte, error) {
 	if len(ciphertext) < 12 {
 		return nil, errors.New("invalid ciphertext")
 	}
