@@ -16,12 +16,12 @@ import (
 
 func TestE2E(t *testing.T) {
 	t.Run("KV Manager, JSON", func(t *testing.T) {
-		mgr := NewMemoryManager[jsonTestSession]()
+		mgr := NewMemoryManager[jsonTestSession](nil)
 		assertResetMgr(t, mgr)
 		runE2ETest(t, mgr)
 	})
 	t.Run("KV Manager, Protobuf", func(t *testing.T) {
-		mgr := NewMemoryManager[testpb.Session]()
+		mgr := NewMemoryManager[testpb.Session](nil)
 		assertResetMgr(t, mgr)
 		runE2ETest(t, mgr)
 	})
@@ -29,13 +29,13 @@ func TestE2E(t *testing.T) {
 	t.Run("Cookie Manager, JSON", func(t *testing.T) {
 		mgr := NewCookieManager[jsonTestSession](&aesGCMAEAD{
 			encryptionKey: genAESKey(),
-		})
+		}, nil)
 		runE2ETest(t, mgr)
 	})
 	t.Run("Cookie Manager, Protobuf", func(t *testing.T) {
 		mgr := NewCookieManager[testpb.Session](&aesGCMAEAD{
 			encryptionKey: genAESKey(),
-		})
+		}, nil)
 		runE2ETest(t, mgr)
 	})
 }
@@ -73,7 +73,6 @@ type resetmgr[T any] interface {
 func assertResetMgr[PtrT codecAccessor](t testing.TB, mgr resetmgr[PtrT]) {}
 
 func runE2ETest[PtrT codecAccessor](t testing.TB, mgr tmanager[PtrT]) {
-
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /set", func(w http.ResponseWriter, r *http.Request) {

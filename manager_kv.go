@@ -12,13 +12,15 @@ type KV interface {
 	Delete(_ context.Context, key string) error
 }
 
+type KVManagerOpts struct{}
+
 type KVManager[T any] struct {
 	manager *manager[T]
 }
 
 func NewKVManager[T any, PtrT interface {
 	*T
-}](kv KV) *KVManager[PtrT] {
+}](kv KV, opts *KVManagerOpts) *KVManager[PtrT] {
 	s := &kvStore{
 		KV: kv,
 	}
@@ -29,10 +31,10 @@ func NewKVManager[T any, PtrT interface {
 
 func NewMemoryManager[T any, PtrT interface {
 	*T
-}]() *KVManager[PtrT] {
+}](opts *KVManagerOpts) *KVManager[PtrT] {
 	return NewKVManager[T, PtrT](&memoryKV{
 		contents: make(map[string]kvItem),
-	})
+	}, opts)
 }
 
 func (k *KVManager[T]) Wrap(next http.Handler) http.Handler {

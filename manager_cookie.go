@@ -5,13 +5,15 @@ import (
 	"net/http"
 )
 
+type CookieManagerOpts struct{}
+
 type CookieManager[T any] struct {
 	manager *manager[T]
 }
 
 func NewCookieManager[T any, PtrT interface {
 	*T
-}](aead AEAD) *CookieManager[PtrT] {
+}](aead AEAD, opts *CookieManagerOpts) *CookieManager[PtrT] {
 	s := &cookieStore{
 		AEAD:           aead,
 		CookieTemplate: DefaultCookieTemplate,
