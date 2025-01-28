@@ -13,8 +13,6 @@ var DefaultCookieTemplate = &http.Cookie{
 	SameSite: http.SameSiteLaxMode,
 }
 
-// var ErrNotFound = errors.New("session not found")
-
 // use https://github.com/golang/go/issues/67057#issuecomment-2261204789 when released
 func newSID() string {
 	var b = make([]byte, 128/8)

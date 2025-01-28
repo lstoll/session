@@ -17,14 +17,14 @@ import (
 func TestE2E(t *testing.T) {
 	t.Run("KV Manager, JSON", func(t *testing.T) {
 		mgr := NewKVManager[jsonTestSession](&memoryKV{
-			contents: make(map[string][]byte),
+			contents: make(map[string]kvItem),
 		})
 		assertResetMgr(t, mgr)
 		runE2ETest(t, mgr)
 	})
 	t.Run("KV Manager, Protobuf", func(t *testing.T) {
 		mgr := NewKVManager[testpb.Session](&memoryKV{
-			contents: make(map[string][]byte),
+			contents: make(map[string]kvItem),
 		})
 		assertResetMgr(t, mgr)
 		runE2ETest(t, mgr)

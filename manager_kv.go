@@ -3,11 +3,12 @@ package session
 import (
 	"context"
 	"net/http"
+	"time"
 )
 
 type KV interface {
 	Get(_ context.Context, key string) (_ []byte, found bool, _ error)
-	Set(_ context.Context, key string, value []byte) error
+	Set(_ context.Context, key string, expiresAt time.Time, value []byte) error
 	Delete(_ context.Context, key string) error
 }
 

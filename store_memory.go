@@ -3,10 +3,16 @@ package session
 import (
 	"context"
 	"sync"
+	"time"
 )
 
+type kvItem struct {
+	data      []byte
+	expiresAt time.Time
+}
+
 type memoryKV struct {
-	contents   map[string][]byte
+	contents   map[string]kvItem
 	contentsMu sync.RWMutex
 }
 
@@ -15,14 +21,24 @@ func (m *memoryKV) Get(_ context.Context, key string) (_ []byte, found bool, _ e
 	defer m.contentsMu.RUnlock()
 
 	v, ok := m.contents[key]
-	return v, ok, nil
+	if !ok {
+		return nil, false, nil
+	}
+	if time.Now().After(v.expiresAt) {
+		delete(m.contents, key)
+		return nil, false, nil
+	}
+	return v.data, true, nil
 }
 
-func (m *memoryKV) Set(_ context.Context, key string, value []byte) error {
+func (m *memoryKV) Set(_ context.Context, key string, expiresAt time.Time, value []byte) error {
 	m.contentsMu.Lock()
 	defer m.contentsMu.Unlock()
 
-	m.contents[key] = value
+	m.contents[key] = kvItem{
+		data:      value,
+		expiresAt: expiresAt,
+	}
 	return nil
 }
 
@@ -32,12 +48,4 @@ func (m *memoryKV) Delete(_ context.Context, key string) error {
 
 	delete(m.contents, key)
 	return nil
-}
-
-func NewMemoryStore() *kvStore {
-	return &kvStore{
-		KV: &memoryKV{
-			contents: make(map[string][]byte),
-		},
-	}
 }

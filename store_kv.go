@@ -51,7 +51,7 @@ func (k *kvStore) put(w http.ResponseWriter, r *http.Request, expiresAt time.Tim
 		kvSess.id = newSID()
 	}
 
-	if err := k.KV.Set(r.Context(), kvSess.id, data); err != nil {
+	if err := k.KV.Set(r.Context(), kvSess.id, expiresAt, data); err != nil {
 		return fmt.Errorf("putting session data: %w", err)
 	}
 
