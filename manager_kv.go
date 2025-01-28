@@ -27,6 +27,14 @@ func NewKVManager[T any, PtrT interface {
 	}
 }
 
+func NewMemoryManager[T any, PtrT interface {
+	*T
+}]() *KVManager[PtrT] {
+	return NewKVManager[T, PtrT](&memoryKV{
+		contents: make(map[string]kvItem),
+	})
+}
+
 func (k *KVManager[T]) Wrap(next http.Handler) http.Handler {
 	return k.manager.wrap(next)
 }
