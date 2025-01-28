@@ -34,8 +34,8 @@ func (m *memoryKV) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-func NewMemoryStore() *KVStore {
-	return &KVStore{
+func NewMemoryStore() *kvStore {
+	return &kvStore{
 		KV: &memoryKV{
 			contents: make(map[string][]byte),
 		},

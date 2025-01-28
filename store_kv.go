@@ -8,19 +8,13 @@ import (
 	"time"
 )
 
-type KV interface {
-	Get(_ context.Context, key string) (_ []byte, found bool, _ error)
-	Set(_ context.Context, key string, value []byte) error
-	Delete(_ context.Context, key string) error
-}
-
-type KVStore struct {
+type kvStore struct {
 	KV         KV
 	CookieOpts *CookieOpts
 }
 
-// Get loads and unmarshals the session in to into
-func (k *KVStore) Get(r *http.Request) ([]byte, error) {
+// get loads and unmarshals the session in to into
+func (k *kvStore) get(r *http.Request) ([]byte, error) {
 	kvSess := k.getOrInitKVSess(r)
 
 	// TODO(lstoll) differentiate deleted vs. emptied
@@ -49,9 +43,9 @@ func (k *KVStore) Get(r *http.Request) ([]byte, error) {
 	return b, nil
 }
 
-// Put saves a session. If a session exists it should be updated, otherwise
+// put saves a session. If a session exists it should be updated, otherwise
 // a new session should be created.
-func (k *KVStore) Put(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
+func (k *kvStore) put(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
 	kvSess := k.getOrInitKVSess(r)
 	if kvSess.id == "" {
 		kvSess.id = newSID()
@@ -69,8 +63,8 @@ func (k *KVStore) Put(w http.ResponseWriter, r *http.Request, expiresAt time.Tim
 	return nil
 }
 
-// Delete deletes the session.
-func (k *KVStore) Delete(w http.ResponseWriter, r *http.Request) error {
+// delete deletes the session.
+func (k *kvStore) delete(w http.ResponseWriter, r *http.Request) error {
 	kvSess := k.getOrInitKVSess(r)
 	if kvSess.id == "" {
 		// no session ID to delete
@@ -95,14 +89,14 @@ func (k *KVStore) Delete(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (k *KVStore) cookieName() string {
+func (k *kvStore) cookieName() string {
 	if k.CookieOpts != nil && k.CookieOpts.Name != "" {
 		return k.CookieOpts.Name
 	}
 	return "session-id"
 }
 
-func (k *KVStore) newCookie() *http.Cookie {
+func (k *kvStore) newCookie() *http.Cookie {
 	c := &http.Cookie{
 		Name: k.cookieName(),
 	}
@@ -112,7 +106,7 @@ func (k *KVStore) newCookie() *http.Cookie {
 	return c
 }
 
-func (k *KVStore) getOrInitKVSess(r *http.Request) *kvSession {
+func (k *kvStore) getOrInitKVSess(r *http.Request) *kvSession {
 	kvSess, ok := r.Context().Value(kvSessCtxKey{inst: k}).(*kvSession)
 	if ok {
 		return kvSess
@@ -132,7 +126,7 @@ func getOrDefault[T comparable](check T, defaulted T) T {
 	return defaulted
 }
 
-type kvSessCtxKey struct{ inst *KVStore }
+type kvSessCtxKey struct{ inst *kvStore }
 
 // kvSession tracks information about the session across the request's context
 type kvSession struct {

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -14,31 +15,33 @@ import (
 )
 
 func TestE2E(t *testing.T) {
-	stores := map[string]Store{
-		"memory-kv": &KVStore{
-			KV: &memoryKV{
-				contents: make(map[string][]byte),
-			},
-		},
-		/*"cookie": &CookieStore{
-			AEAD: &AESGCMAEAD{
-				encryptionKey: genAESKey(),
-			},
-			CookieTemplate: &http.Cookie{
-				Name: "cookie-session",
-			},
-			Marshaler: DefaultMarshaler,
-		},*/
-	}
+	t.Run("KV Manager, JSON", func(t *testing.T) {
+		mgr := NewKVManager[jsonTestSession](&memoryKV{
+			contents: make(map[string][]byte),
+		})
+		assertResetMgr(t, mgr)
+		runE2ETest(t, mgr)
+	})
+	t.Run("KV Manager, Protobuf", func(t *testing.T) {
+		mgr := NewKVManager[testpb.Session](&memoryKV{
+			contents: make(map[string][]byte),
+		})
+		assertResetMgr(t, mgr)
+		runE2ETest(t, mgr)
+	})
 
-	for _, s := range stores {
-		t.Run("JSON codec", func(t *testing.T) {
-			runE2ETest[jsonTestSession](t, s)
+	t.Run("Cookie Manager, JSON", func(t *testing.T) {
+		mgr := NewCookieManager[jsonTestSession](&AESGCMAEAD{
+			encryptionKey: genAESKey(),
 		})
-		t.Run("Proto codes", func(t *testing.T) {
-			runE2ETest[testpb.Session](t, s)
+		runE2ETest(t, mgr)
+	})
+	t.Run("Cookie Manager, Protobuf", func(t *testing.T) {
+		mgr := NewCookieManager[testpb.Session](&AESGCMAEAD{
+			encryptionKey: genAESKey(),
 		})
-	}
+		runE2ETest(t, mgr)
+	})
 }
 
 type jsonTestSession struct {
@@ -58,12 +61,22 @@ type codecAccessor interface {
 	SetMap(map[string]string)
 }
 
-func runE2ETest[T any, PtrT interface {
-	*T
-	codecAccessor
-}](t testing.TB, store Store) {
+type tmanager[T any] interface {
+	Wrap(http.Handler) http.Handler
+	Get(context.Context) (T, bool)
+	Save(context.Context, T)
+	Delete(context.Context)
+}
 
-	mgr := NewManager[T, PtrT](store)
+type resetmgr[T any] interface {
+	tmanager[T]
+	Reset(context.Context, T)
+}
+
+// no-op, just makes the compile-time type check fail if it's not
+func assertResetMgr[PtrT codecAccessor](t testing.TB, mgr resetmgr[PtrT]) {}
+
+func runE2ETest[PtrT codecAccessor](t testing.TB, mgr tmanager[PtrT]) {
 
 	mux := http.NewServeMux()
 
@@ -112,10 +125,13 @@ func runE2ETest[T any, PtrT interface {
 		_, _ = w.Write([]byte(value))
 	})
 
-	mux.HandleFunc("GET /reset", func(w http.ResponseWriter, r *http.Request) {
-		sess, _ := mgr.Get(r.Context())
-		mgr.Reset(r.Context(), sess)
-	})
+	rmgr, isReset := mgr.(resetmgr[PtrT])
+	if isReset {
+		mux.HandleFunc("GET /reset", func(w http.ResponseWriter, r *http.Request) {
+			sess, _ := rmgr.Get(r.Context())
+			rmgr.Reset(r.Context(), sess)
+		})
+	}
 
 	mux.HandleFunc("GET /clear", func(w http.ResponseWriter, r *http.Request) {
 		mgr.Delete(r.Context())
@@ -146,29 +162,31 @@ func runE2ETest[T any, PtrT interface {
 		}
 	}
 
-	// duplicate the jar, so after a reset we can make sure the old
-	// session still can't be loaded.
-	oldJar := must(cookiejar.New(nil))
-	svrURL := must(url.Parse(svr.URL))
-	oldJar.SetCookies(svrURL, jar.Cookies(svrURL))
-	oldClient := &http.Client{
-		Transport: svr.Client().Transport,
-		Jar:       oldJar,
-	}
+	if isReset {
+		// duplicate the jar, so after a reset we can make sure the old
+		// session still can't be loaded.
+		oldJar := must(cookiejar.New(nil))
+		svrURL := must(url.Parse(svr.URL))
+		oldJar.SetCookies(svrURL, jar.Cookies(svrURL))
+		oldClient := &http.Client{
+			Transport: svr.Client().Transport,
+			Jar:       oldJar,
+		}
 
-	doReq(t, client, svr.URL+"/reset", http.StatusOK)
-	doReq(t, client, svr.URL+"/get?key=test1", http.StatusOK)
+		doReq(t, client, svr.URL+"/reset", http.StatusOK)
+		doReq(t, client, svr.URL+"/get?key=test1", http.StatusOK)
 
-	// this should fail, as the old session should no longer be accessible under
-	// this ID.
-	// TODO - won't work for cookies though.
-	doReq(t, oldClient, svr.URL+"/get?key=test1", http.StatusNotFound)
+		// this should fail, as the old session should no longer be accessible under
+		// this ID.
+		// TODO - won't work for cookies though.
+		doReq(t, oldClient, svr.URL+"/get?key=test1", http.StatusNotFound)
 
-	// clear it, and make sure it doesn't work
-	for _, c := range []*http.Client{client, oldClient} {
-		doReq(t, c, svr.URL+"/clear", http.StatusOK)
-		doReq(t, c, svr.URL+"/get?key=test1", http.StatusNotFound)
-		doReq(t, c, svr.URL+"/get?key=reset1", http.StatusNotFound)
+		// clear it, and make sure it doesn't work
+		for _, c := range []*http.Client{client, oldClient} {
+			doReq(t, c, svr.URL+"/clear", http.StatusOK)
+			doReq(t, c, svr.URL+"/get?key=test1", http.StatusNotFound)
+			doReq(t, c, svr.URL+"/get?key=reset1", http.StatusNotFound)
+		}
 	}
 }
 

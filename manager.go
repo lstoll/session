@@ -9,34 +9,34 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-/*type Sessionable interface {
-	// // New is called on a nil receiver of this type. It should construct a new
-	// // instance of the session type, for when a session is initialized. It can
-	// // be used to set any defaults.
-	NewSession() Sessionable
-	// SessionName returns a unique name for this session type. It should be
-	// constant, and may be called with a nil self.
-	// SessionName() string
-	SessionValid() bool
-}*/
+type store interface {
+	// get loads the encoded data for a session from the request. If there is no
+	// session data, it should return nil
+	get(r *http.Request) ([]byte, error)
+	// put saves a session. If a session exists it should be updated, otherwise
+	// a new session should be created.
+	put(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error
+	// delete deletes the session.
+	delete(w http.ResponseWriter, r *http.Request) error
+}
 
-// Manager is used to automatically manage a typed session. It wraps handlers,
+// manager is used to automatically manage a typed session. It wraps handlers,
 // and loads/saves the session type as needed. It provides methods to interact
 // with the session.
-type Manager[T any] struct {
-	Store Store
+type manager[T any] struct {
+	store store
 
 	codec codec
 
 	newEmpty func() T
 }
 
-func NewManager[T any, PtrT interface {
+func newManager[T any, PtrT interface {
 	*T
-}](s Store) *Manager[PtrT] {
+}](s store) *manager[PtrT] {
 	// TODO - options with expiry
-	m := &Manager[PtrT]{
-		Store: s,
+	m := &manager[PtrT]{
+		store: s,
 		newEmpty: func() PtrT {
 			return PtrT(new(T))
 		},
@@ -51,7 +51,7 @@ func NewManager[T any, PtrT interface {
 	return m
 }
 
-func (a *Manager[T]) Wrap(next http.Handler) http.Handler {
+func (a *manager[T]) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sctx := &sessCtx[T]{
 			metadata: &sessionMetadata{
@@ -60,7 +60,7 @@ func (a *Manager[T]) Wrap(next http.Handler) http.Handler {
 			data: a.newEmpty(),
 		}
 
-		data, err := a.Store.Get(r)
+		data, err := a.store.get(r)
 		if err != nil {
 			a.handleErr(w, r, err)
 			return
@@ -93,7 +93,7 @@ func (a *Manager[T]) Wrap(next http.Handler) http.Handler {
 	})
 }
 
-func (a *Manager[T]) Get(ctx context.Context) (_ T, exist bool) {
+func (a *manager[T]) get(ctx context.Context) (_ T, exist bool) {
 	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: a}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
@@ -102,7 +102,7 @@ func (a *Manager[T]) Get(ctx context.Context) (_ T, exist bool) {
 	return sessCtx.data, sessCtx.loaded
 }
 
-func (a *Manager[T]) Save(ctx context.Context, sess T) {
+func (a *manager[T]) save(ctx context.Context, sess T) {
 	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: a}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
@@ -112,7 +112,7 @@ func (a *Manager[T]) Save(ctx context.Context, sess T) {
 	sessCtx.data = sess
 }
 
-func (a *Manager[T]) Delete(ctx context.Context) {
+func (a *manager[T]) delete(ctx context.Context) {
 	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: a}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
@@ -122,31 +122,27 @@ func (a *Manager[T]) Delete(ctx context.Context) {
 	sessCtx.reset = false
 }
 
-func (a *Manager[T]) Reset(ctx context.Context, sess T) {
+func (a *manager[T]) reset(ctx context.Context, sess T) {
 	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: a}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
 	}
+	sessCtx.data = sess
 	sessCtx.save = false
 	sessCtx.delete = false
 	sessCtx.reset = true
-
-	// TODO - make reset KV only
-	// maybe turn manager to private, have KVManager and CookieManager wrap it with
-	// it mostly being pass-through. only expose the reset on the KVManager. then reset can maybe be smarter
-	// about set-cookie with new ID, rather than delete/create.
 }
 
-func (a *Manager[T]) handleErr(w http.ResponseWriter, r *http.Request, err error) {
+func (a *manager[T]) handleErr(w http.ResponseWriter, r *http.Request, err error) {
 	slog.ErrorContext(r.Context(), "error in session manager", "err", err)
 	http.Error(w, "Internal Error", http.StatusInternalServerError)
 }
 
-func (a *Manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.ResponseWriter) bool {
+func (a *manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.ResponseWriter) bool {
 	return func(w http.ResponseWriter) bool {
 		// if we have delete or reset, delete the session
 		if sctx.delete || sctx.reset {
-			if err := a.Store.Delete(w, r); err != nil {
+			if err := a.store.delete(w, r); err != nil {
 				a.handleErr(w, r, err)
 				return false
 			}
@@ -160,7 +156,7 @@ func (a *Manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.Res
 				return false
 			}
 
-			if err := a.Store.Put(w, r, time.Now().Add(1*time.Minute), sb); err != nil {
+			if err := a.store.put(w, r, time.Now().Add(1*time.Minute), sb); err != nil {
 				a.handleErr(w, r, err)
 				return false
 			}
@@ -170,7 +166,7 @@ func (a *Manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.Res
 	}
 }
 
-type mgrSessCtxKey[T any] struct{ inst *Manager[T] }
+type mgrSessCtxKey[T any] struct{ inst *manager[T] }
 
 type sessCtx[T any] struct {
 	//loaded flags if this was an existing session
