@@ -91,6 +91,7 @@ func (k *KVManager[T]) Reset(ctx context.Context, sess T) {
 	k.manager.reset(ctx, sess)
 }
 
+//nolint:unused // used by the test context helper
 func (k *KVManager[T]) getManagerInstance() *manager[T] {
 	return k.manager
 }
