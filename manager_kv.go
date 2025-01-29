@@ -90,3 +90,7 @@ func (k *KVManager[T]) Delete(ctx context.Context) {
 func (k *KVManager[T]) Reset(ctx context.Context, sess T) {
 	k.manager.reset(ctx, sess)
 }
+
+func (k *KVManager[T]) getManagerInstance() *manager[T] {
+	return k.manager
+}

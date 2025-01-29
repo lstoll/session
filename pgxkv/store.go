@@ -96,27 +96,29 @@ func (k *KV) GC(ctx context.Context) (deleted int, _ error) {
 }
 
 func (k *KV) RunGC(ctx context.Context, interval time.Duration, logger *slog.Logger) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			if logger != nil {
-				logger.InfoContext(ctx, "Garbage collection stopped", "reason", ctx.Err())
-			}
-			return
-		case <-ticker.C:
-			deleted, err := k.GC(ctx)
-			if err != nil {
+		for {
+			select {
+			case <-ctx.Done():
 				if logger != nil {
-					logger.ErrorContext(ctx, "Garbage collection failed", "error", err)
+					logger.InfoContext(ctx, "Garbage collection stopped", "reason", ctx.Err())
 				}
-			} else {
-				if logger != nil {
-					logger.InfoContext(ctx, "Garbage collection successful", "deleted_rows", deleted)
+				return
+			case <-ticker.C:
+				deleted, err := k.GC(ctx)
+				if err != nil {
+					if logger != nil {
+						logger.ErrorContext(ctx, "Garbage collection failed", "error", err)
+					}
+				} else {
+					if logger != nil {
+						logger.InfoContext(ctx, "Garbage collection successful", "deleted_rows", deleted)
+					}
 				}
 			}
 		}
-	}
+	}()
 }
