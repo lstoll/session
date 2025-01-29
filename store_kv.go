@@ -9,8 +9,8 @@ import (
 )
 
 type kvStore struct {
-	KV         KV
-	CookieOpts *CookieOpts
+	kv         KV
+	cookieOpts *CookieOpts
 }
 
 // get loads and unmarshals the session in to into
@@ -32,7 +32,7 @@ func (k *kvStore) get(r *http.Request) ([]byte, error) {
 		kvSess.id = cookie.Value
 	}
 
-	b, ok, err := k.KV.Get(r.Context(), kvSess.id)
+	b, ok, err := k.kv.Get(r.Context(), kvSess.id)
 	if err != nil {
 		return nil, fmt.Errorf("loading from KV: %w", err)
 	}
@@ -51,11 +51,11 @@ func (k *kvStore) put(w http.ResponseWriter, r *http.Request, expiresAt time.Tim
 		kvSess.id = newSID()
 	}
 
-	if err := k.KV.Set(r.Context(), kvSess.id, expiresAt, data); err != nil {
+	if err := k.kv.Set(r.Context(), kvSess.id, expiresAt, data); err != nil {
 		return fmt.Errorf("putting session data: %w", err)
 	}
 
-	c := k.newCookie()
+	c := k.cookieOpts.newCookie()
 	c.Expires = expiresAt
 	c.Value = kvSess.id
 	http.SetCookie(w, c)
@@ -71,12 +71,12 @@ func (k *kvStore) delete(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 
-	if err := k.KV.Delete(r.Context(), kvSess.id); err != nil {
+	if err := k.kv.Delete(r.Context(), kvSess.id); err != nil {
 		return fmt.Errorf("deleting session %s from store: %w", kvSess.id, err)
 	}
 
 	// always clear the cookie
-	dc := k.newCookie()
+	dc := k.cookieOpts.newCookie()
 	dc.Name = k.cookieName()
 	dc.MaxAge = -1
 	http.SetCookie(w, dc)
@@ -90,20 +90,10 @@ func (k *kvStore) delete(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (k *kvStore) cookieName() string {
-	if k.CookieOpts != nil && k.CookieOpts.Name != "" {
-		return k.CookieOpts.Name
+	if k.cookieOpts != nil && k.cookieOpts.Name != "" {
+		return k.cookieOpts.Name
 	}
 	return "session-id"
-}
-
-func (k *kvStore) newCookie() *http.Cookie {
-	c := &http.Cookie{
-		Name: k.cookieName(),
-	}
-	if k.CookieOpts == nil || !k.CookieOpts.Insecure {
-		c.Secure = true
-	}
-	return c
 }
 
 func (k *kvStore) getOrInitKVSess(r *http.Request) *kvSession {

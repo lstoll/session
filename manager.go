@@ -29,17 +29,28 @@ type manager[T any] struct {
 	codec codec
 
 	newEmpty func() T
+
+	opts managerOpts
+}
+
+type managerOpts struct {
+	// expiry sets the duration from now we should use for the store put
+	expiry time.Duration
 }
 
 func newManager[T any, PtrT interface {
 	*T
-}](s store) *manager[PtrT] {
+}](s store, opts *managerOpts) *manager[PtrT] {
 	// TODO - options with expiry
 	m := &manager[PtrT]{
 		store: s,
 		newEmpty: func() PtrT {
 			return PtrT(new(T))
 		},
+	}
+
+	if opts != nil {
+		m.opts = *opts
 	}
 
 	if _, ok := any(m.newEmpty()).(proto.Message); ok {
@@ -51,36 +62,36 @@ func newManager[T any, PtrT interface {
 	return m
 }
 
-func (a *manager[T]) wrap(next http.Handler) http.Handler {
+func (m *manager[T]) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sctx := &sessCtx[T]{
 			metadata: &sessionMetadata{
 				CreatedAt: time.Now(),
 			},
-			data: a.newEmpty(),
+			data: m.newEmpty(),
 		}
 
-		data, err := a.store.get(r)
+		data, err := m.store.get(r)
 		if err != nil {
-			a.handleErr(w, r, err)
+			m.handleErr(w, r, err)
 			return
 		}
 
 		if data != nil {
-			md, err := a.codec.Decode(data, sctx.data)
+			md, err := m.codec.Decode(data, sctx.data)
 			if err != nil {
-				a.handleErr(w, r, err)
+				m.handleErr(w, r, err)
 				return
 			}
 			sctx.loaded = true
 			sctx.metadata = md
 		}
 
-		r = r.WithContext(context.WithValue(r.Context(), mgrSessCtxKey[T]{inst: a}, sctx))
+		r = r.WithContext(context.WithValue(r.Context(), mgrSessCtxKey[T]{inst: m}, sctx))
 
 		hw := &hookRW{
 			ResponseWriter: w,
-			hook:           a.saveHook(r, sctx),
+			hook:           m.saveHook(r, sctx),
 		}
 
 		next.ServeHTTP(hw, r)
@@ -93,8 +104,8 @@ func (a *manager[T]) wrap(next http.Handler) http.Handler {
 	})
 }
 
-func (a *manager[T]) get(ctx context.Context) (_ T, exist bool) {
-	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: a}).(*sessCtx[T])
+func (m *manager[T]) get(ctx context.Context) (_ T, exist bool) {
+	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
 	}
@@ -102,8 +113,8 @@ func (a *manager[T]) get(ctx context.Context) (_ T, exist bool) {
 	return sessCtx.data, sessCtx.loaded
 }
 
-func (a *manager[T]) save(ctx context.Context, sess T) {
-	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: a}).(*sessCtx[T])
+func (m *manager[T]) save(ctx context.Context, sess T) {
+	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
 	}
@@ -112,8 +123,8 @@ func (a *manager[T]) save(ctx context.Context, sess T) {
 	sessCtx.data = sess
 }
 
-func (a *manager[T]) delete(ctx context.Context) {
-	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: a}).(*sessCtx[T])
+func (m *manager[T]) delete(ctx context.Context) {
+	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
 	}
@@ -122,8 +133,8 @@ func (a *manager[T]) delete(ctx context.Context) {
 	sessCtx.reset = false
 }
 
-func (a *manager[T]) reset(ctx context.Context, sess T) {
-	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: a}).(*sessCtx[T])
+func (m *manager[T]) reset(ctx context.Context, sess T) {
+	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
 	}
@@ -133,31 +144,31 @@ func (a *manager[T]) reset(ctx context.Context, sess T) {
 	sessCtx.reset = true
 }
 
-func (a *manager[T]) handleErr(w http.ResponseWriter, r *http.Request, err error) {
+func (m *manager[T]) handleErr(w http.ResponseWriter, r *http.Request, err error) {
 	slog.ErrorContext(r.Context(), "error in session manager", "err", err)
 	http.Error(w, "Internal Error", http.StatusInternalServerError)
 }
 
-func (a *manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.ResponseWriter) bool {
+func (m *manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.ResponseWriter) bool {
 	return func(w http.ResponseWriter) bool {
 		// if we have delete or reset, delete the session
 		if sctx.delete || sctx.reset {
-			if err := a.store.delete(w, r); err != nil {
-				a.handleErr(w, r, err)
+			if err := m.store.delete(w, r); err != nil {
+				m.handleErr(w, r, err)
 				return false
 			}
 		}
 
 		// if we have reset or save, save the session
 		if sctx.save || sctx.reset {
-			sb, err := a.codec.Encode(sctx.data, sctx.metadata)
+			sb, err := m.codec.Encode(sctx.data, sctx.metadata)
 			if err != nil {
-				a.handleErr(w, r, err)
+				m.handleErr(w, r, err)
 				return false
 			}
 
-			if err := a.store.put(w, r, time.Now().Add(1*time.Minute), sb); err != nil {
-				a.handleErr(w, r, err)
+			if err := m.store.put(w, r, time.Now().Add(m.opts.expiry), sb); err != nil {
+				m.handleErr(w, r, err)
 				return false
 			}
 		}
@@ -172,7 +183,7 @@ type sessCtx[T any] struct {
 	//loaded flags if this was an existing session
 	loaded   bool
 	metadata *sessionMetadata
-	// data is the actual session data, untyped
+	// data is the actual session data
 	data   T
 	delete bool
 	save   bool

@@ -15,6 +15,16 @@ type CookieOpts struct {
 	Name     string
 	Path     string
 	Insecure bool
+	MaxAge   time.Duration
+}
+
+func (c *CookieOpts) newCookie() *http.Cookie {
+	return &http.Cookie{
+		Name:   c.Name,
+		Path:   c.Path,
+		Secure: !c.Insecure,
+		MaxAge: int(c.MaxAge),
+	}
 }
 
 const defaultMaxAge = 30 * 24 * time.Hour
@@ -35,20 +45,20 @@ var _ store = (*cookieStore)(nil)
 
 type cookieStore struct {
 	AEAD                AEAD
-	CookieTemplate      *http.Cookie
+	cookieOpts          *CookieOpts
 	CompressionDisabled bool
 }
 
 // Get loads and unmarshals the session in to into
 func (c *cookieStore) get(r *http.Request) ([]byte, error) {
 	// no active session loaded, try and fetch from cookie
-	cookie, err := r.Cookie(c.CookieTemplate.Name)
+	cookie, err := r.Cookie(c.cookieOpts.Name)
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
 			// no session, no op
 			return nil, nil
 		}
-		return nil, fmt.Errorf("getting cookie %s: %w", c.CookieTemplate.Name, err)
+		return nil, fmt.Errorf("getting cookie %s: %w", c.cookieOpts.Name, err)
 	}
 
 	sp := strings.SplitN(cookie.Value, ".", 2)
@@ -77,7 +87,7 @@ func (c *cookieStore) get(r *http.Request) ([]byte, error) {
 	}
 
 	// decrypt
-	db, err := c.AEAD.Decrypt(cd, []byte(c.CookieTemplate.Name))
+	db, err := c.AEAD.Decrypt(cd, []byte(c.cookieOpts.Name))
 	if err != nil {
 		return nil, fmt.Errorf("decrypting cookie: %w", err)
 	}
@@ -112,7 +122,7 @@ func (c *cookieStore) put(w http.ResponseWriter, r *http.Request, expiresAt time
 	}
 
 	var err error
-	data, err = c.AEAD.Encrypt(data, []byte(c.CookieTemplate.Name))
+	data, err = c.AEAD.Encrypt(data, []byte(c.cookieOpts.Name))
 	if err != nil {
 		return fmt.Errorf("encrypting cookie failed: %w", err)
 	}
@@ -122,7 +132,7 @@ func (c *cookieStore) put(w http.ResponseWriter, r *http.Request, expiresAt time
 		return fmt.Errorf("cookie size %d is greater than max %d", len(cv), maxCookieSize)
 	}
 
-	cookie := c.newCookie()
+	cookie := c.cookieOpts.newCookie()
 	cookie.Value = cv
 	http.SetCookie(w, cookie)
 
@@ -131,15 +141,9 @@ func (c *cookieStore) put(w http.ResponseWriter, r *http.Request, expiresAt time
 
 // Delete deletes the session.
 func (c *cookieStore) delete(w http.ResponseWriter, r *http.Request) error {
-	dc := c.newCookie()
+	dc := c.cookieOpts.newCookie()
 	dc.MaxAge = -1
 	http.SetCookie(w, dc)
 
 	return nil
-}
-
-func (c *cookieStore) newCookie() *http.Cookie {
-	cp := getOrDefault(c.CookieTemplate, DefaultCookieTemplate)
-	nc := *cp
-	return &nc
 }

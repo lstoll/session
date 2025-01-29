@@ -12,7 +12,28 @@ type KV interface {
 	Delete(_ context.Context, key string) error
 }
 
-type KVManagerOpts struct{}
+const (
+	DefaultExpiraton    = 24 * time.Hour
+	DefaultKVCookieName = "session-id"
+)
+
+var (
+	DefaultKVCookieOpts = &CookieOpts{
+		Name: "session-id",
+	}
+)
+
+type KVManagerOpts struct {
+	// Expiration is the time passed to the storage, after which the session
+	// data should no longer be considered valid. This will be extended every
+	// time the session is written to/reset. Defaults to DefaultExpiraton. This
+	// does not affect the tracking cookie lifetime, which can be customized via
+	// CookieOpts.
+	Expiration time.Duration
+	// CookieOpts can be used to manage the cookie the session ID is tracked in.
+	// If not set, DefaultKVCookieName will be used for the name.
+	CookieOpts *CookieOpts
+}
 
 type KVManager[T any] struct {
 	manager *manager[T]
@@ -22,10 +43,23 @@ func NewKVManager[T any, PtrT interface {
 	*T
 }](kv KV, opts *KVManagerOpts) *KVManager[PtrT] {
 	s := &kvStore{
-		KV: kv,
+		kv:         kv,
+		cookieOpts: DefaultKVCookieOpts,
+	}
+	mgropts := &managerOpts{
+		expiry: defaultMaxAge,
+	}
+	if opts != nil {
+		if opts.Expiration == 0 {
+			mgropts.expiry = opts.Expiration
+		}
+		if opts.CookieOpts != nil {
+			s.cookieOpts = opts.CookieOpts
+		}
+
 	}
 	return &KVManager[PtrT]{
-		manager: newManager[T, PtrT](s),
+		manager: newManager[T, PtrT](s, mgropts),
 	}
 }
 
