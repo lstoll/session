@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -21,18 +23,18 @@ func (k *kvStore) get(r *http.Request) ([]byte, error) {
 
 	if kvSess.id == "" {
 		// no active session loaded, try and fetch from cookie
-		cookie, err := r.Cookie(k.cookieName())
+		cookie, err := r.Cookie(k.cookieOpts.Name)
 		if err != nil {
 			if errors.Is(err, http.ErrNoCookie) {
 				// kvSess.id = newSID()
 				return nil, nil
 			}
-			return nil, fmt.Errorf("getting cookie %s: %w", k.cookieName(), err)
+			return nil, fmt.Errorf("getting cookie %s: %w", k.cookieOpts.Name, err)
 		}
 		kvSess.id = cookie.Value
 	}
 
-	b, ok, err := k.kv.Get(r.Context(), kvSess.id)
+	b, ok, err := k.kv.Get(r.Context(), k.storeID(kvSess.id))
 	if err != nil {
 		return nil, fmt.Errorf("loading from KV: %w", err)
 	}
@@ -51,9 +53,12 @@ func (k *kvStore) put(w http.ResponseWriter, r *http.Request, expiresAt time.Tim
 		kvSess.id = newSID()
 	}
 
-	if err := k.kv.Set(r.Context(), kvSess.id, expiresAt, data); err != nil {
+	if err := k.kv.Set(r.Context(), k.storeID(kvSess.id), expiresAt, data); err != nil {
 		return fmt.Errorf("putting session data: %w", err)
 	}
+
+	// TODO - check existing cookie/header, only set if changed (e.g expiry),
+	// remove any delete.
 
 	c := k.cookieOpts.newCookie()
 	c.Expires = expiresAt
@@ -71,13 +76,12 @@ func (k *kvStore) delete(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 
-	if err := k.kv.Delete(r.Context(), kvSess.id); err != nil {
+	if err := k.kv.Delete(r.Context(), k.storeID(kvSess.id)); err != nil {
 		return fmt.Errorf("deleting session %s from store: %w", kvSess.id, err)
 	}
 
 	// always clear the cookie
 	dc := k.cookieOpts.newCookie()
-	dc.Name = k.cookieName()
 	dc.MaxAge = -1
 	http.SetCookie(w, dc)
 
@@ -87,13 +91,6 @@ func (k *kvStore) delete(w http.ResponseWriter, r *http.Request) error {
 	kvSess.id = newSID()
 
 	return nil
-}
-
-func (k *kvStore) cookieName() string {
-	if k.cookieOpts != nil && k.cookieOpts.Name != "" {
-		return k.cookieOpts.Name
-	}
-	return "session-id"
 }
 
 func (k *kvStore) getOrInitKVSess(r *http.Request) *kvSession {
@@ -108,12 +105,10 @@ func (k *kvStore) getOrInitKVSess(r *http.Request) *kvSession {
 	return kvSess
 }
 
-func getOrDefault[T comparable](check T, defaulted T) T {
-	var nilt T
-	if check != nilt {
-		return check
-	}
-	return defaulted
+func (k *kvStore) storeID(id string) string {
+	h := sha256.New()
+	h.Write([]byte(id))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 type kvSessCtxKey struct{ inst *kvStore }

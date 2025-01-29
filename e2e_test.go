@@ -15,6 +15,11 @@ import (
 )
 
 func TestE2E(t *testing.T) {
+	aead, err := newAESGCMAEAD(genAESKey(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	t.Run("KV Manager, JSON", func(t *testing.T) {
 		mgr := NewMemoryManager[jsonTestSession](nil)
 		assertResetMgr(t, mgr)
@@ -27,15 +32,11 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("Cookie Manager, JSON", func(t *testing.T) {
-		mgr := NewCookieManager[jsonTestSession](&aesGCMAEAD{
-			encryptionKey: genAESKey(),
-		}, nil)
+		mgr := NewCookieManager[jsonTestSession](aead, nil)
 		runE2ETest(t, mgr)
 	})
 	t.Run("Cookie Manager, Protobuf", func(t *testing.T) {
-		mgr := NewCookieManager[testpb.Session](&aesGCMAEAD{
-			encryptionKey: genAESKey(),
-		}, nil)
+		mgr := NewCookieManager[testpb.Session](aead, nil)
 		runE2ETest(t, mgr)
 	})
 }
