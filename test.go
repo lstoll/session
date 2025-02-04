@@ -5,14 +5,11 @@ import (
 	"time"
 )
 
-func ContextWithSession[T any](mgr interface {
-	getManagerInstance() *manager[T]
-}, ctx context.Context, sess T, loaded bool) context.Context {
-	return context.WithValue(ctx, mgrSessCtxKey[T]{inst: mgr.getManagerInstance()}, &sessCtx[T]{
+func ContextWithSession[T any](mgr *Manager[T], ctx context.Context, sess T) context.Context {
+	return context.WithValue(ctx, mgrSessCtxKey[T]{inst: mgr}, &sessCtx[T]{
 		metadata: &sessionMetadata{
 			CreatedAt: time.Now(),
 		},
-		loaded: loaded,
-		data:   sess,
+		data: sess,
 	})
 }

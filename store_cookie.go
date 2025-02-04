@@ -10,24 +10,30 @@ import (
 	"time"
 )
 
+var defaultCookieStoreCookieOpts = &CookieOpts{
+	Name: "session",
+}
+
 // CookieOpts can be used to customize the cookie used for tracking sessions.
 type CookieOpts struct {
 	Name     string
 	Path     string
 	Insecure bool
-	MaxAge   time.Duration
+	Persist  bool
 }
 
-func (c *CookieOpts) newCookie() *http.Cookie {
-	return &http.Cookie{
+func (c *CookieOpts) newCookie(exp time.Time) *http.Cookie {
+	hc := &http.Cookie{
 		Name:   c.Name,
 		Path:   c.Path,
 		Secure: !c.Insecure,
-		MaxAge: int(c.MaxAge),
+		// MaxAge: int(c.MaxAge),
 	}
+	if c.Persist {
+		hc.MaxAge = int(time.Until(exp))
+	}
+	return hc
 }
-
-const defaultMaxAge = 30 * 24 * time.Hour
 
 const (
 	cookieMagic           = "EU1"
@@ -41,7 +47,7 @@ const (
 
 var cookieValueEncoding = base64.RawURLEncoding
 
-var _ store = (*cookieStore)(nil)
+var _ Store = (*cookieStore)(nil)
 
 type cookieStore struct {
 	AEAD                AEAD
@@ -49,8 +55,8 @@ type cookieStore struct {
 	CompressionDisabled bool
 }
 
-// Get loads and unmarshals the session in to into
-func (c *cookieStore) get(r *http.Request) ([]byte, error) {
+// GetSession loads and unmarshals the session in to into
+func (c *cookieStore) GetSession(r *http.Request) ([]byte, error) {
 	// no active session loaded, try and fetch from cookie
 	cookie, err := r.Cookie(c.cookieOpts.Name)
 	if err != nil {
@@ -101,9 +107,9 @@ func (c *cookieStore) get(r *http.Request) ([]byte, error) {
 	return db, nil
 }
 
-// Put saves a session. If a session exists it should be updated, otherwise
+// PutSession saves a session. If a session exists it should be updated, otherwise
 // a new session should be created.
-func (c *cookieStore) put(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
+func (c *cookieStore) PutSession(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
 	b := make([]byte, 8)
 	binary.LittleEndian.PutUint64(b, uint64(expiresAt.Unix()))
 	data = append(b, data...)
@@ -132,7 +138,7 @@ func (c *cookieStore) put(w http.ResponseWriter, r *http.Request, expiresAt time
 		return fmt.Errorf("cookie size %d is greater than max %d", len(cv), maxCookieSize)
 	}
 
-	cookie := c.cookieOpts.newCookie()
+	cookie := c.cookieOpts.newCookie(expiresAt)
 	cookie.Value = cv
 	http.SetCookie(w, cookie)
 
@@ -140,8 +146,8 @@ func (c *cookieStore) put(w http.ResponseWriter, r *http.Request, expiresAt time
 }
 
 // Delete deletes the session.
-func (c *cookieStore) delete(w http.ResponseWriter, r *http.Request) error {
-	dc := c.cookieOpts.newCookie()
+func (c *cookieStore) DeleteSession(w http.ResponseWriter, r *http.Request) error {
+	dc := c.cookieOpts.newCookie(time.Time{})
 	dc.MaxAge = -1
 	http.SetCookie(w, dc)
 

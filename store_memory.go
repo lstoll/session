@@ -16,6 +16,10 @@ type memoryKV struct {
 	contentsMu sync.RWMutex
 }
 
+func NewMemoryKV() KV {
+	return &memoryKV{contents: make(map[string]kvItem)}
+}
+
 func (m *memoryKV) Get(_ context.Context, key string) (_ []byte, found bool, _ error) {
 	m.contentsMu.RLock()
 	defer m.contentsMu.RUnlock()

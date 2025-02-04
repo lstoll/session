@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -9,48 +10,66 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-type store interface {
-	// get loads the encoded data for a session from the request. If there is no
-	// session data, it should return nil
-	get(r *http.Request) ([]byte, error)
-	// put saves a session. If a session exists it should be updated, otherwise
-	// a new session should be created.
-	put(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error
-	// delete deletes the session.
-	delete(w http.ResponseWriter, r *http.Request) error
+// sessionMetadata tracks additional information for the session manager to use,
+// alongside the session data itself.
+type sessionMetadata struct {
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
-// manager is used to automatically manage a typed session. It wraps handlers,
+type Store interface {
+	// GetSession loads the encoded data for a session from the request. If there is no
+	// session data, it should return nil.
+	GetSession(r *http.Request) ([]byte, error)
+	// PutSession saves a session. If a session exists it should be updated,
+	// otherwise a new session should be created. expiresAt indicates the time
+	// the data can be considered to be no longer used, and can be garbage
+	// collected.
+	PutSession(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error
+	// DeleteSession deletes the session.
+	DeleteSession(w http.ResponseWriter, r *http.Request) error
+}
+
+// Manager is used to automatically manage a typed session. It wraps handlers,
 // and loads/saves the session type as needed. It provides methods to interact
 // with the session.
-type manager[T any] struct {
-	store store
+type Manager[T any] struct {
+	store Store
 
 	codec codec
 
 	newEmpty func() T
 
-	opts managerOpts
+	opts ManagerOpts
 }
 
-type managerOpts struct {
-	// expiry sets the duration from now we should use for the store put
-	expiry time.Duration
+var DefaultIdleTimeout = 24 * time.Hour
+
+type ManagerOpts struct {
+	MaxLifetime time.Duration
+	IdleTimeout time.Duration
 }
 
-func newManager[T any, PtrT interface {
+func NewManager[T any, PtrT interface {
 	*T
-}](s store, opts *managerOpts) *manager[PtrT] {
+}](s Store, opts *ManagerOpts) (*Manager[PtrT], error) {
 	// TODO - options with expiry
-	m := &manager[PtrT]{
+	m := &Manager[PtrT]{
 		store: s,
 		newEmpty: func() PtrT {
 			return PtrT(new(T))
+		},
+		opts: ManagerOpts{
+			IdleTimeout: DefaultIdleTimeout,
 		},
 	}
 
 	if opts != nil {
 		m.opts = *opts
+	}
+
+	if m.opts.IdleTimeout == 0 && m.opts.MaxLifetime == 0 {
+		return nil, errors.New("at least one of idle timeout or max lifetime must be specified")
 	}
 
 	if _, ok := any(m.newEmpty()).(proto.Message); ok {
@@ -59,10 +78,10 @@ func newManager[T any, PtrT interface {
 		m.codec = &jsonCodec{}
 	}
 
-	return m
+	return m, nil
 }
 
-func (m *manager[T]) wrap(next http.Handler) http.Handler {
+func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sctx := &sessCtx[T]{
 			metadata: &sessionMetadata{
@@ -71,7 +90,7 @@ func (m *manager[T]) wrap(next http.Handler) http.Handler {
 			data: m.newEmpty(),
 		}
 
-		data, err := m.store.get(r)
+		data, err := m.store.GetSession(r)
 		if err != nil {
 			m.handleErr(w, r, err)
 			return
@@ -83,8 +102,10 @@ func (m *manager[T]) wrap(next http.Handler) http.Handler {
 				m.handleErr(w, r, err)
 				return
 			}
-			sctx.loaded = true
 			sctx.metadata = md
+			if m.opts.IdleTimeout != 0 {
+				sctx.datab = data
+			}
 		}
 
 		r = r.WithContext(context.WithValue(r.Context(), mgrSessCtxKey[T]{inst: m}, sctx))
@@ -104,16 +125,20 @@ func (m *manager[T]) wrap(next http.Handler) http.Handler {
 	})
 }
 
-func (m *manager[T]) get(ctx context.Context) (_ T, exist bool) {
+// Get returns a pointer to the current session. exist indicates if an existing
+// session was loaded, otherwise a new session was started
+func (m *Manager[T]) Get(ctx context.Context) (_ T) {
 	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
 	}
 
-	return sessCtx.data, sessCtx.loaded
+	return sessCtx.data
 }
 
-func (m *manager[T]) save(ctx context.Context, sess T) {
+// Save sets the session data, and marks it to be saved at the end of the
+// request.
+func (m *Manager[T]) Save(ctx context.Context, sess T) {
 	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
@@ -123,37 +148,45 @@ func (m *manager[T]) save(ctx context.Context, sess T) {
 	sessCtx.data = sess
 }
 
-func (m *manager[T]) delete(ctx context.Context) {
+// Delete marks the session for deletion at the end of the request
+func (m *Manager[T]) Delete(ctx context.Context) {
 	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
 	}
+	sessCtx.datab = nil
 	sessCtx.delete = true
 	sessCtx.save = false
 	sessCtx.reset = false
 }
 
-func (m *manager[T]) reset(ctx context.Context, sess T) {
+// Reset rotates the session ID. Used to avoid session fixation, should be
+// called on privilege elevation. This should be called at the end of a request.
+// If this is not supported by the store, this will no-op.
+func (m *Manager[T]) Reset(ctx context.Context, sess T) {
 	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
 	}
 	sessCtx.data = sess
+	sessCtx.datab = nil
 	sessCtx.save = false
 	sessCtx.delete = false
 	sessCtx.reset = true
 }
 
-func (m *manager[T]) handleErr(w http.ResponseWriter, r *http.Request, err error) {
+func (m *Manager[T]) handleErr(w http.ResponseWriter, r *http.Request, err error) {
 	slog.ErrorContext(r.Context(), "error in session manager", "err", err)
 	http.Error(w, "Internal Error", http.StatusInternalServerError)
 }
 
-func (m *manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.ResponseWriter) bool {
+func (m *Manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.ResponseWriter) bool {
 	return func(w http.ResponseWriter) bool {
+		sctx.metadata.UpdatedAt = time.Now()
+
 		// if we have delete or reset, delete the session
 		if sctx.delete || sctx.reset {
-			if err := m.store.delete(w, r); err != nil {
+			if err := m.store.DeleteSession(w, r); err != nil {
 				m.handleErr(w, r, err)
 				return false
 			}
@@ -167,7 +200,14 @@ func (m *manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.Res
 				return false
 			}
 
-			if err := m.store.put(w, r, time.Now().Add(m.opts.expiry), sb); err != nil {
+			if err := m.store.PutSession(w, r, m.calculateExpiry(sctx.metadata), sb); err != nil {
+				m.handleErr(w, r, err)
+				return false
+			}
+		} else if m.opts.IdleTimeout != 0 && len(sctx.datab) != 0 {
+			// always need to bump the last access time. If we weren't marked to
+			// save, do this with the original data.
+			if err := m.store.PutSession(w, r, m.calculateExpiry(sctx.metadata), sctx.datab); err != nil {
 				m.handleErr(w, r, err)
 				return false
 			}
@@ -177,14 +217,47 @@ func (m *manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.Res
 	}
 }
 
-type mgrSessCtxKey[T any] struct{ inst *manager[T] }
+func (m *Manager[T]) calculateExpiry(md *sessionMetadata) time.Time {
+	var invalidTimes []time.Time
+
+	if m.opts.MaxLifetime != 0 {
+		maxInvalidAt := md.CreatedAt.Add(m.opts.MaxLifetime)
+		invalidTimes = append(invalidTimes, maxInvalidAt)
+	}
+
+	if m.opts.IdleTimeout != 0 {
+		var idleInvalidAt time.Time
+		if !md.UpdatedAt.IsZero() {
+			idleInvalidAt = md.UpdatedAt.Add(m.opts.IdleTimeout)
+		} else {
+			idleInvalidAt = md.CreatedAt.Add(m.opts.IdleTimeout)
+		}
+		invalidTimes = append(invalidTimes, idleInvalidAt)
+	}
+
+	if len(invalidTimes) == 0 {
+		return time.Time{}
+	}
+
+	earliestInvalidAt := invalidTimes[0]
+	for _, t := range invalidTimes[1:] {
+		if t.Before(earliestInvalidAt) {
+			earliestInvalidAt = t
+		}
+	}
+
+	return earliestInvalidAt
+}
+
+type mgrSessCtxKey[T any] struct{ inst *Manager[T] }
 
 type sessCtx[T any] struct {
-	//loaded flags if this was an existing session
-	loaded   bool
 	metadata *sessionMetadata
 	// data is the actual session data
-	data   T
+	data T
+	// datab is the original loaded data bytes. Used for idle timeout, when a
+	// save may happen without data modification
+	datab  []byte
 	delete bool
 	save   bool
 	reset  bool

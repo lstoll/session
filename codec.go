@@ -11,10 +11,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-type sessionMetadata struct {
-	CreatedAt time.Time
-}
-
 type codec interface {
 	Encode(data any, md *sessionMetadata) ([]byte, error)
 	Decode(data []byte, into any) (*sessionMetadata, error)
@@ -25,6 +21,7 @@ var _ codec = (*protoCodec)(nil)
 type jsonSession struct {
 	Data      json.RawMessage `json:"data"`
 	CreatedAt time.Time       `json:"createdAt"`
+	UpdatedAt time.Time       `json:"updatedAt"`
 }
 
 var _ codec = (*jsonCodec)(nil)
@@ -40,6 +37,7 @@ func (p *jsonCodec) Encode(data any, md *sessionMetadata) ([]byte, error) {
 	js := jsonSession{
 		Data:      bb,
 		CreatedAt: md.CreatedAt,
+		UpdatedAt: md.UpdatedAt,
 	}
 
 	sb, err := json.Marshal(&js)
@@ -80,6 +78,7 @@ func (p *protoCodec) Encode(data any, md *sessionMetadata) ([]byte, error) {
 	wr := sessionv1.Session_builder{
 		Data:      dataany,
 		CreatedAt: timestamppb.New(md.CreatedAt),
+		UpdatedAt: timestamppb.New(md.UpdatedAt),
 	}.Build()
 
 	return proto.Marshal(wr)

@@ -10,13 +10,42 @@ import (
 	"time"
 )
 
-type kvStore struct {
+var DefaultKVStoreCookieOpts = &CookieOpts{
+	Name: "session-id",
+}
+
+type KV interface {
+	Get(_ context.Context, key string) (_ []byte, found bool, _ error)
+	Set(_ context.Context, key string, expiresAt time.Time, value []byte) error
+	Delete(_ context.Context, key string) error
+}
+
+var _ Store = (*KVStore)(nil)
+
+type KVStore struct {
 	kv         KV
 	cookieOpts *CookieOpts
 }
 
-// get loads and unmarshals the session in to into
-func (k *kvStore) get(r *http.Request) ([]byte, error) {
+type KVStoreOpts struct {
+	CookieOpts *CookieOpts
+}
+
+func NewKVStore(kv KV, opts *KVStoreOpts) (*KVStore, error) {
+	s := &KVStore{
+		kv:         kv,
+		cookieOpts: DefaultKVStoreCookieOpts,
+	}
+	if opts != nil {
+		if opts.CookieOpts != nil {
+			s.cookieOpts = opts.CookieOpts
+		}
+	}
+	return s, nil
+}
+
+// GetSession loads and unmarshals the session in to into
+func (k *KVStore) GetSession(r *http.Request) ([]byte, error) {
 	kvSess := k.getOrInitKVSess(r)
 
 	// TODO(lstoll) differentiate deleted vs. emptied
@@ -45,9 +74,9 @@ func (k *kvStore) get(r *http.Request) ([]byte, error) {
 	return b, nil
 }
 
-// put saves a session. If a session exists it should be updated, otherwise
+// PutSession saves a session. If a session exists it should be updated, otherwise
 // a new session should be created.
-func (k *kvStore) put(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
+func (k *KVStore) PutSession(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
 	kvSess := k.getOrInitKVSess(r)
 	if kvSess.id == "" {
 		kvSess.id = newSID()
@@ -60,7 +89,7 @@ func (k *kvStore) put(w http.ResponseWriter, r *http.Request, expiresAt time.Tim
 	// TODO - check existing cookie/header, only set if changed (e.g expiry),
 	// remove any delete.
 
-	c := k.cookieOpts.newCookie()
+	c := k.cookieOpts.newCookie(expiresAt)
 	c.Expires = expiresAt
 	c.Value = kvSess.id
 	http.SetCookie(w, c)
@@ -68,8 +97,8 @@ func (k *kvStore) put(w http.ResponseWriter, r *http.Request, expiresAt time.Tim
 	return nil
 }
 
-// delete deletes the session.
-func (k *kvStore) delete(w http.ResponseWriter, r *http.Request) error {
+// DeleteSession deletes the session.
+func (k *KVStore) DeleteSession(w http.ResponseWriter, r *http.Request) error {
 	kvSess := k.getOrInitKVSess(r)
 	if kvSess.id == "" {
 		// no session ID to delete
@@ -81,7 +110,7 @@ func (k *kvStore) delete(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	// always clear the cookie
-	dc := k.cookieOpts.newCookie()
+	dc := k.cookieOpts.newCookie(time.Time{})
 	dc.MaxAge = -1
 	http.SetCookie(w, dc)
 
@@ -93,7 +122,7 @@ func (k *kvStore) delete(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (k *kvStore) getOrInitKVSess(r *http.Request) *kvSession {
+func (k *KVStore) getOrInitKVSess(r *http.Request) *kvSession {
 	kvSess, ok := r.Context().Value(kvSessCtxKey{inst: k}).(*kvSession)
 	if ok {
 		return kvSess
@@ -105,13 +134,13 @@ func (k *kvStore) getOrInitKVSess(r *http.Request) *kvSession {
 	return kvSess
 }
 
-func (k *kvStore) storeID(id string) string {
+func (k *KVStore) storeID(id string) string {
 	h := sha256.New()
 	h.Write([]byte(id))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-type kvSessCtxKey struct{ inst *kvStore }
+type kvSessCtxKey struct{ inst *KVStore }
 
 // kvSession tracks information about the session across the request's context
 type kvSession struct {

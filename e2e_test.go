@@ -1,7 +1,6 @@
 package session
 
 import (
-	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -11,7 +10,7 @@ import (
 	"net/url"
 	"testing"
 
-	testpb "github.com/lstoll/session/internal/proto"
+	testpb "github.com/lstoll/session/internal/proto/test"
 )
 
 func TestE2E(t *testing.T) {
@@ -20,25 +19,48 @@ func TestE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	cookieStore := &cookieStore{
+		AEAD:       aead,
+		cookieOpts: defaultCookieStoreCookieOpts,
+	}
+
+	kvStore, err := NewKVStore(&memoryKV{contents: make(map[string]kvItem)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	t.Run("KV Manager, JSON", func(t *testing.T) {
-		mgr := NewMemoryManager[jsonTestSession](nil)
-		assertResetMgr(t, mgr)
-		runE2ETest(t, mgr)
+		mgr, err := NewManager[jsonTestSession](kvStore, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runE2ETest(t, mgr, true)
 	})
+
 	t.Run("KV Manager, Protobuf", func(t *testing.T) {
-		mgr := NewMemoryManager[testpb.Session](nil)
-		assertResetMgr(t, mgr)
-		runE2ETest(t, mgr)
+		mgr, err := NewManager[testpb.Session](kvStore, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runE2ETest(t, mgr, true)
 	})
 
 	t.Run("Cookie Manager, JSON", func(t *testing.T) {
-		mgr := NewCookieManager[jsonTestSession](aead, nil)
-		runE2ETest(t, mgr)
+		mgr, err := NewManager[jsonTestSession](cookieStore, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runE2ETest(t, mgr, false)
 	})
+
 	t.Run("Cookie Manager, Protobuf", func(t *testing.T) {
-		mgr := NewCookieManager[testpb.Session](aead, nil)
-		runE2ETest(t, mgr)
+		mgr, err := NewManager[testpb.Session](cookieStore, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runE2ETest(t, mgr, false)
 	})
+
 }
 
 type jsonTestSession struct {
@@ -58,26 +80,11 @@ type codecAccessor interface {
 	SetMap(map[string]string)
 }
 
-type tmanager[T any] interface {
-	Wrap(http.Handler) http.Handler
-	Get(context.Context) (T, bool)
-	Save(context.Context, T)
-	Delete(context.Context)
-}
-
-type resetmgr[T any] interface {
-	tmanager[T]
-	Reset(context.Context, T)
-}
-
-// no-op, just makes the compile-time type check fail if it's not
-func assertResetMgr[PtrT codecAccessor](t testing.TB, mgr resetmgr[PtrT]) {}
-
-func runE2ETest[PtrT codecAccessor](t testing.TB, mgr tmanager[PtrT]) {
+func runE2ETest[PtrT codecAccessor](t testing.TB, mgr *Manager[PtrT], testReset bool) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /set", func(w http.ResponseWriter, r *http.Request) {
-		sess, _ := mgr.Get(r.Context())
+		sess := mgr.Get(r.Context())
 
 		key := r.URL.Query().Get("key")
 		if key == "" {
@@ -105,7 +112,7 @@ func runE2ETest[PtrT codecAccessor](t testing.TB, mgr tmanager[PtrT]) {
 	})
 
 	mux.HandleFunc("GET /get", func(w http.ResponseWriter, r *http.Request) {
-		sess, _ := mgr.Get(r.Context())
+		sess := mgr.Get(r.Context())
 
 		key := r.URL.Query().Get("key")
 		if key == "" {
@@ -121,11 +128,10 @@ func runE2ETest[PtrT codecAccessor](t testing.TB, mgr tmanager[PtrT]) {
 		_, _ = w.Write([]byte(value))
 	})
 
-	rmgr, isReset := mgr.(resetmgr[PtrT])
-	if isReset {
+	if testReset {
 		mux.HandleFunc("GET /reset", func(w http.ResponseWriter, r *http.Request) {
-			sess, _ := rmgr.Get(r.Context())
-			rmgr.Reset(r.Context(), sess)
+			sess := mgr.Get(r.Context())
+			mgr.Reset(r.Context(), sess)
 		})
 	}
 
@@ -158,7 +164,7 @@ func runE2ETest[PtrT codecAccessor](t testing.TB, mgr tmanager[PtrT]) {
 		}
 	}
 
-	if isReset {
+	if testReset {
 		// duplicate the jar, so after a reset we can make sure the old
 		// session still can't be loaded.
 		oldJar := must(cookiejar.New(nil))
