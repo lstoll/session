@@ -83,6 +83,12 @@ func NewManager[T any, PtrT interface {
 
 func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.Context().Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T]); ok {
+			// already wrapped for this instance, noop
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		sctx := &sessCtx[T]{
 			metadata: &sessionMetadata{
 				CreatedAt: time.Now(),
