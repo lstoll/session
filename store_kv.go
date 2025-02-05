@@ -88,12 +88,11 @@ func (k *KVStore) PutSession(w http.ResponseWriter, r *http.Request, expiresAt t
 		return fmt.Errorf("putting session data: %w", err)
 	}
 
-	// TODO - check existing cookie/header, only set if changed (e.g expiry),
-	// remove any delete.
-
 	c := k.cookieOpts.newCookie(expiresAt)
 	c.Expires = expiresAt
 	c.Value = kvSess.id
+
+	removeCookieByName(w, c.Name)
 	http.SetCookie(w, c)
 
 	return nil
@@ -114,6 +113,8 @@ func (k *KVStore) DeleteSession(w http.ResponseWriter, r *http.Request) error {
 	// always clear the cookie
 	dc := k.cookieOpts.newCookie(time.Time{})
 	dc.MaxAge = -1
+
+	removeCookieByName(w, dc.Name)
 	http.SetCookie(w, dc)
 
 	// assign a fresh SID, so if we do save again it'll go under a new session.
@@ -149,30 +150,24 @@ type kvSession struct {
 	id string
 }
 
-func removeDuplicateCookies(w http.ResponseWriter) {
+func removeCookieByName(w http.ResponseWriter, cookieName string) {
 	headers := w.Header()
-	setCookieHeaders := headers["Set-Cookie"]
+	setCookieHeaders := w.Header()["Set-Cookie"]
 
-	// Use a map to track seen cookies (name=value as key)
-	seenCookies := make(map[string]bool)
-	uniqueCookies := []string{}
+	if len(setCookieHeaders) == 0 {
+		return
+	}
 
+	updatedCookies := []string{}
 	for _, cookie := range setCookieHeaders {
-		// Extract the name=value part of the cookie.  This is a simplification;
-		// more robust parsing might be needed for complex cookie attributes.
-		parts := strings.SplitN(cookie, ";", 2) // Split at the first semicolon
-		nameValue := parts[0]
-
-		//Check to see if the cookie is already present
-		if !seenCookies[nameValue] {
-			uniqueCookies = append(uniqueCookies, cookie)
-			seenCookies[nameValue] = true
+		parts := strings.SplitN(cookie, "=", 2)
+		if len(parts) > 0 && parts[0] != cookieName {
+			updatedCookies = append(updatedCookies, cookie)
 		}
 	}
 
-	// Clear existing Set-Cookie headers and replace with unique ones
 	headers.Del("Set-Cookie")
-	for _, cookie := range uniqueCookies {
+	for _, cookie := range updatedCookies {
 		headers.Add("Set-Cookie", cookie)
 	}
 }

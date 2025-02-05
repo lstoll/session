@@ -211,7 +211,20 @@ func doReq(t testing.TB, client *http.Client, url string, wantStatus int) string
 		t.Logf("body: %s", string(bb))
 		t.Fatalf("non-%d response status: %d", wantStatus, resp.StatusCode)
 	}
+	assertNoDuplicateCookies(t, resp.Cookies())
 	return string(bb)
+}
+
+func assertNoDuplicateCookies(t testing.TB, cookies []*http.Cookie) {
+	t.Helper()
+
+	seen := make(map[string]struct{})
+	for _, cookie := range cookies {
+		if _, exists := seen[cookie.Name]; exists {
+			t.Errorf("cookie %s has multiple set's", cookie.Name)
+		}
+		seen[cookie.Name] = struct{}{}
+	}
 }
 
 func must[T any](v T, err error) T {
