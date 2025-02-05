@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
 var DefaultKVStoreCookieOpts = &CookieOpts{
 	Name: "session-id",
+	Path: "/",
 }
 
 type KV interface {
@@ -145,4 +147,32 @@ type kvSessCtxKey struct{ inst *KVStore }
 // kvSession tracks information about the session across the request's context
 type kvSession struct {
 	id string
+}
+
+func removeDuplicateCookies(w http.ResponseWriter) {
+	headers := w.Header()
+	setCookieHeaders := headers["Set-Cookie"]
+
+	// Use a map to track seen cookies (name=value as key)
+	seenCookies := make(map[string]bool)
+	uniqueCookies := []string{}
+
+	for _, cookie := range setCookieHeaders {
+		// Extract the name=value part of the cookie.  This is a simplification;
+		// more robust parsing might be needed for complex cookie attributes.
+		parts := strings.SplitN(cookie, ";", 2) // Split at the first semicolon
+		nameValue := parts[0]
+
+		//Check to see if the cookie is already present
+		if !seenCookies[nameValue] {
+			uniqueCookies = append(uniqueCookies, cookie)
+			seenCookies[nameValue] = true
+		}
+	}
+
+	// Clear existing Set-Cookie headers and replace with unique ones
+	headers.Del("Set-Cookie")
+	for _, cookie := range uniqueCookies {
+		headers.Add("Set-Cookie", cookie)
+	}
 }

@@ -12,6 +12,7 @@ import (
 
 var defaultCookieStoreCookieOpts = &CookieOpts{
 	Name: "session",
+	Path: "/",
 }
 
 // CookieOpts can be used to customize the cookie used for tracking sessions.
