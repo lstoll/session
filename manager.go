@@ -40,26 +40,29 @@ type Manager[T any] struct {
 
 	newEmpty func() T
 
-	opts ManagerOpts
+	opts ManagerOpts[T]
 }
 
 var DefaultIdleTimeout = 24 * time.Hour
 
-type ManagerOpts struct {
+type ManagerOpts[T any] struct {
 	MaxLifetime time.Duration
 	IdleTimeout time.Duration
+	// Onload is called when a session is retrieved from the Store. It can make
+	// any changes as needed, returning the session that should be used.
+	Onload func(T) T
 }
 
 func NewManager[T any, PtrT interface {
 	*T
-}](s Store, opts *ManagerOpts) (*Manager[PtrT], error) {
+}](s Store, opts *ManagerOpts[PtrT]) (*Manager[PtrT], error) {
 	// TODO - options with expiry
 	m := &Manager[PtrT]{
 		store: s,
 		newEmpty: func() PtrT {
 			return PtrT(new(T))
 		},
-		opts: ManagerOpts{
+		opts: ManagerOpts[PtrT]{
 			IdleTimeout: DefaultIdleTimeout,
 		},
 	}
@@ -109,8 +112,13 @@ func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 				return
 			}
 			sctx.metadata = md
+			// track the original data if we have an idle timeout, so we can
+			// short path re-save it.
 			if m.opts.IdleTimeout != 0 {
 				sctx.datab = data
+			}
+			if m.opts.Onload != nil {
+				sctx.data = m.opts.Onload(sctx.data)
 			}
 		}
 
@@ -154,13 +162,15 @@ func (m *Manager[T]) Save(ctx context.Context, sess T) {
 	sessCtx.data = sess
 }
 
-// Delete marks the session for deletion at the end of the request
+// Delete marks the session for deletion at the end of the request, and discards
+// the current session's data.
 func (m *Manager[T]) Delete(ctx context.Context) {
 	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
 	if !ok {
 		panic("context contained no or invalid session")
 	}
 	sessCtx.datab = nil
+	sessCtx.data = m.newEmpty()
 	sessCtx.delete = true
 	sessCtx.save = false
 	sessCtx.reset = false
