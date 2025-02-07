@@ -12,7 +12,7 @@ import (
 )
 
 var DefaultKVStoreCookieOpts = &CookieOpts{
-	Name: "session-id",
+	Name: "__Host-session-id",
 	Path: "/",
 }
 

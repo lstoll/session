@@ -11,7 +11,7 @@ import (
 )
 
 var defaultCookieStoreCookieOpts = &CookieOpts{
-	Name: "session",
+	Name: "__Host-session",
 	Path: "/",
 }
 
@@ -25,10 +25,10 @@ type CookieOpts struct {
 
 func (c *CookieOpts) newCookie(exp time.Time) *http.Cookie {
 	hc := &http.Cookie{
-		Name:   c.Name,
-		Path:   c.Path,
-		Secure: !c.Insecure,
-		// MaxAge: int(c.MaxAge),
+		Name:     c.Name,
+		Path:     c.Path,
+		Secure:   !c.Insecure,
+		HttpOnly: true,
 	}
 	if c.Persist {
 		hc.MaxAge = int(time.Until(exp))
