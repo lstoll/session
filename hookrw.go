@@ -6,6 +6,12 @@ import (
 	"sync"
 )
 
+// ensure we obey the optional unwrap interface stdlib http expects
+var _ interface {
+	http.ResponseWriter
+	Unwrap() http.ResponseWriter
+} = (*hookRW)(nil)
+
 // hookRW can be used to trigger an action before the response writing starts,
 // in our case saving the session. It will only be called once
 type hookRW struct {
@@ -36,4 +42,8 @@ func (h *hookRW) WriteHeader(statusCode int) {
 	if write {
 		h.ResponseWriter.WriteHeader(statusCode)
 	}
+}
+
+func (h *hookRW) Unwrap() http.ResponseWriter {
+	return h.ResponseWriter
 }

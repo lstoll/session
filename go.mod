@@ -1,5 +1,7 @@
-module github.com/lstoll/session
+module lds.li/session
 
-go 1.22.0
+go 1.26
 
-require google.golang.org/protobuf v1.36.4
+require golang.org/x/crypto v0.53.0
+
+require golang.org/x/sys v0.46.0 // indirect

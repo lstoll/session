@@ -10,82 +10,36 @@ import (
 	"net/url"
 	"testing"
 
-	testpb "github.com/lstoll/session/internal/proto/test"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 func TestE2E(t *testing.T) {
-	aead, err := newAESGCMAEAD(genAESKey(), nil)
+	aead, err := NewXChaPolyAEAD(genXChaPolyKey(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	cookieStore := &cookieStore{
-		AEAD:       aead,
-		cookieOpts: defaultCookieStoreCookieOpts,
-	}
-
-	kvStore, err := NewKVStore(&memoryKV{contents: make(map[string]kvItem)}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Run("KV Manager, JSON", func(t *testing.T) {
-		mgr, err := NewManager[jsonTestSession](kvStore, nil)
+	t.Run("KV Manager", func(t *testing.T) {
+		mgr, err := NewKVManager(&memoryKV{contents: make(map[string]kvItem)}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		runE2ETest(t, mgr, true)
 	})
 
-	t.Run("KV Manager, Protobuf", func(t *testing.T) {
-		mgr, err := NewManager[testpb.Session](kvStore, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		runE2ETest(t, mgr, true)
-	})
-
-	t.Run("Cookie Manager, JSON", func(t *testing.T) {
-		mgr, err := NewManager[jsonTestSession](cookieStore, nil)
+	t.Run("Cookie Manager", func(t *testing.T) {
+		mgr, err := NewCookieManager(aead, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		runE2ETest(t, mgr, false)
 	})
-
-	t.Run("Cookie Manager, Protobuf", func(t *testing.T) {
-		mgr, err := NewManager[testpb.Session](cookieStore, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		runE2ETest(t, mgr, false)
-	})
-
 }
 
-type jsonTestSession struct {
-	KV map[string]string `json:"map"`
-}
-
-func (j *jsonTestSession) GetMap() map[string]string {
-	return j.KV
-}
-
-func (j *jsonTestSession) SetMap(m map[string]string) {
-	j.KV = m
-}
-
-type codecAccessor interface {
-	GetMap() map[string]string
-	SetMap(map[string]string)
-}
-
-func runE2ETest[PtrT codecAccessor](t testing.TB, mgr *Manager[PtrT], testReset bool) {
+func runE2ETest(t testing.TB, mgr *Manager, testReset bool) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /set", func(w http.ResponseWriter, r *http.Request) {
-		sess := mgr.Get(r.Context())
-
 		key := r.URL.Query().Get("key")
 		if key == "" {
 			http.Error(w, "query with no key", http.StatusInternalServerError)
@@ -93,34 +47,32 @@ func runE2ETest[PtrT codecAccessor](t testing.TB, mgr *Manager[PtrT], testReset 
 		}
 
 		value := r.URL.Query().Get("value")
-		if key == "" {
+		if value == "" {
 			t.Logf("query with no value")
 			http.Error(w, "query with no value", http.StatusInternalServerError)
 			return
 		}
 
-		m := sess.GetMap()
-		if m == nil {
-			m = make(map[string]string)
-		}
-
-		m[key] = value
-
-		sess.SetMap(m)
-
-		mgr.Save(r.Context(), sess)
+		// Log the key/value being set for debugging
+		t.Logf("Setting session key=%s, value=%s", key, value)
+		sess := MustFromContext(r.Context())
+		sess.Set(key, value)
 	})
 
 	mux.HandleFunc("GET /get", func(w http.ResponseWriter, r *http.Request) {
-		sess := mgr.Get(r.Context())
-
 		key := r.URL.Query().Get("key")
 		if key == "" {
 			t.Fatal("query with no key")
 		}
 
-		value, ok := sess.GetMap()[key]
+		// Log raw session data from context for debugging
+		sessCtx := r.Context().Value(sessionContextKey{}).(*Session)
+		t.Logf("Session data in context: %+v", sessCtx.sessdata.Data)
+
+		sess := MustFromContext(r.Context())
+		value, ok := sess.Get(key).(string)
 		if !ok {
+			t.Logf("Key %s not found in session or not a string: %v", key, sess.Get(key))
 			http.Error(w, "key not in session", http.StatusNotFound)
 			return
 		}
@@ -130,13 +82,14 @@ func runE2ETest[PtrT codecAccessor](t testing.TB, mgr *Manager[PtrT], testReset 
 
 	if testReset {
 		mux.HandleFunc("GET /reset", func(w http.ResponseWriter, r *http.Request) {
-			sess := mgr.Get(r.Context())
-			mgr.Reset(r.Context(), sess)
+			sess := MustFromContext(r.Context())
+			sess.Reset()
 		})
 	}
 
 	mux.HandleFunc("GET /clear", func(w http.ResponseWriter, r *http.Request) {
-		mgr.Delete(r.Context())
+		sess := MustFromContext(r.Context())
+		sess.Delete()
 	})
 
 	svr := httptest.NewTLSServer(mgr.Wrap(mux))
@@ -161,6 +114,8 @@ func runE2ETest[PtrT codecAccessor](t testing.TB, mgr *Manager[PtrT], testReset 
 		resp := doReq(t, client, svr.URL+fmt.Sprintf("/get?key=test%d", i), http.StatusOK)
 		if resp != fmt.Sprintf("value%d", i) {
 			t.Fatalf("wanted returned value value%d, got: %s", i, resp)
+		} else {
+			t.Logf("got value%d", i)
 		}
 	}
 
@@ -199,6 +154,9 @@ func doReq(t testing.TB, client *http.Client, url string, wantStatus int) string
 		t.Fatalf("creating request: %v", err)
 	}
 
+	// Log cookies being sent
+	t.Logf("Request cookies for %s: %v", url, req.Cookies())
+
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("error in request to %s: %v", url, err)
@@ -207,6 +165,10 @@ func doReq(t testing.TB, client *http.Client, url string, wantStatus int) string
 	if err != nil {
 		t.Fatalf("reading body: %v", err)
 	}
+
+	// Log response cookies
+	t.Logf("Response cookies from %s: %v", url, resp.Cookies())
+
 	if resp.StatusCode != wantStatus {
 		t.Logf("body: %s", string(bb))
 		t.Fatalf("non-%d response status: %d", wantStatus, resp.StatusCode)
@@ -227,17 +189,17 @@ func assertNoDuplicateCookies(t testing.TB, cookies []*http.Cookie) {
 	}
 }
 
+func genXChaPolyKey() []byte {
+	k := make([]byte, chacha20poly1305.KeySize)
+	if _, err := io.ReadFull(rand.Reader, k); err != nil {
+		panic(err)
+	}
+	return k
+}
+
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(fmt.Sprintf("error: %v", err))
 	}
 	return v
-}
-
-func genAESKey() []byte {
-	k := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, k); err != nil {
-		panic(err)
-	}
-	return k
 }
