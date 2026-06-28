@@ -5,33 +5,37 @@ import (
 	"time"
 )
 
-type TestResult[T any] struct {
-	ctx *sessCtx[T]
+type TestResult struct {
+	ctx *Session
 }
 
-func (t *TestResult[T]) Saved() bool {
+func (t *TestResult) Saved() bool {
 	return t.ctx.save
 }
 
-func (t *TestResult[T]) Deleted() bool {
+func (t *TestResult) Deleted() bool {
 	return t.ctx.delete
 }
 
-func (t *TestResult[T]) Reset() bool {
+func (t *TestResult) Reset() bool {
 	return t.ctx.reset
 }
 
-func (t *TestResult[T]) Result() T {
-	return t.ctx.data
+func (t *TestResult) Result() map[string]any {
+	return t.ctx.sessdata.Data
 }
 
 // TestContext attaches a session to a context, to be used for testing. The
-// returned TestResult can be used to verify the actions against the session
-func TestContext[T any](mgr *Manager[T], ctx context.Context, sess T) (context.Context, *TestResult[T]) {
-	return context.WithValue(ctx, mgrSessCtxKey[T]{inst: mgr}, &sessCtx[T]{
-		metadata: &sessionMetadata{
-			CreatedAt: time.Now(),
-		},
-		data: sess,
-	}), nil
+// returned TestResult can be used to verify the actions against the session. The session
+// is optional, if omitted a new session is created.
+func TestContext(ctx context.Context, s *Session) (context.Context, *TestResult) {
+	if s == nil {
+		s = &Session{
+			sessdata: persistedSession{
+				Data:      make(map[string]any),
+				CreatedAt: time.Now(),
+			},
+		}
+	}
+	return context.WithValue(ctx, sessionContextKey{}, s), nil
 }

@@ -2,69 +2,108 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
-
-	"google.golang.org/protobuf/proto"
 )
 
-// sessionMetadata tracks additional information for the session manager to use,
-// alongside the session data itself.
-type sessionMetadata struct {
-	CreatedAt time.Time
-	UpdatedAt time.Time
+// FromContext returns the Session from the given context. It panics if no
+// session exists in the context.
+func FromContext(ctx context.Context) (*Session, bool) {
+	sessCtx, ok := ctx.Value(sessionContextKey{}).(*Session)
+	if !ok {
+		return nil, false
+	}
+	return sessCtx, true
 }
 
-type Store interface {
-	// GetSession loads the encoded data for a session from the request. If there is no
-	// session data, it should return nil.
-	GetSession(r *http.Request) ([]byte, error)
-	// PutSession saves a session. If a session exists it should be updated,
-	// otherwise a new session should be created. expiresAt indicates the time
-	// the data can be considered to be no longer used, and can be garbage
-	// collected.
-	PutSession(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error
-	// DeleteSession deletes the session.
-	DeleteSession(w http.ResponseWriter, r *http.Request) error
+// MustFromContext returns the Session from the given context. It panics if no
+// session exists in the context.
+func MustFromContext(ctx context.Context) *Session {
+	sess, ok := FromContext(ctx)
+	if !ok {
+		panic("no session in context")
+	}
+	return sess
 }
 
-// Manager is used to automatically manage a typed session. It wraps handlers,
-// and loads/saves the session type as needed. It provides methods to interact
-// with the session.
-type Manager[T any] struct {
-	store Store
+// storageMode identifies the session storage mechanism
+type storageMode int
 
-	codec codec
+const (
+	// storageModeCookie stores encrypted session data directly in cookies
+	storageModeCookie storageMode = iota
+	// storageModeKV stores session data in a KV store and session ID in cookies
+	storageModeKV
+)
 
-	newEmpty func() T
+// Manager handles both session data and storage.
+type Manager struct {
+	// Storage settings
+	storageMode storageMode
 
-	opts ManagerOpts[T]
+	// Cookie-mode settings
+	aead                AEAD
+	compressionDisabled bool
+
+	// KV-mode settings
+	kv KV
+
+	// Common settings
+	cookieSettings SessionCookieOpts
+	codec          codec
+	opts           ManagerOpts
 }
 
 var DefaultIdleTimeout = 24 * time.Hour
 
-type ManagerOpts[T any] struct {
-	MaxLifetime time.Duration
-	IdleTimeout time.Duration
-	// Onload is called when a session is retrieved from the Store. It can make
-	// any changes as needed, returning the session that should be used.
-	Onload func(T) T
+// SessionCookieOpts configures cookie behavior for sessions
+type SessionCookieOpts struct {
+	Name     string
+	Path     string
+	Insecure bool
+	Persist  bool
 }
 
-func NewManager[T any, PtrT interface {
-	*T
-}](s Store, opts *ManagerOpts[PtrT]) (*Manager[PtrT], error) {
-	// TODO - options with expiry
-	m := &Manager[PtrT]{
-		store: s,
-		newEmpty: func() PtrT {
-			return PtrT(new(T))
-		},
-		opts: ManagerOpts[PtrT]{
+// newCookie creates a cookie with the configured options
+func (c *SessionCookieOpts) newCookie(exp time.Time) *http.Cookie {
+	hc := &http.Cookie{
+		Name:     c.Name,
+		Path:     c.Path,
+		Secure:   !c.Insecure,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	if c.Persist {
+		hc.MaxAge = int(time.Until(exp).Seconds())
+	}
+	return hc
+}
+
+// ManagerOpts configures the session manager
+type ManagerOpts struct {
+	MaxLifetime time.Duration
+	IdleTimeout time.Duration
+	// Onload is called when a session is retrieved from storage
+	Onload func(map[string]any) map[string]any
+	// Cookie settings
+	CookieOpts *SessionCookieOpts
+}
+
+// NewCookieManager creates a new Manager that stores session data in cookies
+func NewCookieManager(aead AEAD, opts *ManagerOpts) (*Manager, error) {
+	m := &Manager{
+		storageMode: storageModeCookie,
+		aead:        aead,
+		opts: ManagerOpts{
 			IdleTimeout: DefaultIdleTimeout,
 		},
+		codec: &gobCodec{},
 	}
 
 	if opts != nil {
@@ -75,54 +114,102 @@ func NewManager[T any, PtrT interface {
 		return nil, errors.New("at least one of idle timeout or max lifetime must be specified")
 	}
 
-	if _, ok := any(m.newEmpty()).(proto.Message); ok {
-		m.codec = &protoCodec{}
+	// Set cookie options
+	if m.opts.CookieOpts != nil {
+		m.cookieSettings = *m.opts.CookieOpts
 	} else {
-		m.codec = &jsonCodec{}
+		m.cookieSettings = SessionCookieOpts{
+			Name: "__Host-session",
+			Path: "/",
+		}
 	}
 
 	return m, nil
 }
 
-func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
+// NewKVManager creates a new Manager that stores session data in a KV store
+func NewKVManager(kv KV, opts *ManagerOpts) (*Manager, error) {
+	m := &Manager{
+		storageMode: storageModeKV,
+		kv:          kv,
+		opts: ManagerOpts{
+			IdleTimeout: DefaultIdleTimeout,
+		},
+		codec: &gobCodec{},
+	}
+
+	if opts != nil {
+		m.opts = *opts
+	}
+
+	if m.opts.IdleTimeout == 0 && m.opts.MaxLifetime == 0 {
+		return nil, errors.New("at least one of idle timeout or max lifetime must be specified")
+	}
+
+	// Set cookie options
+	if m.opts.CookieOpts != nil {
+		m.cookieSettings = *m.opts.CookieOpts
+	} else {
+		m.cookieSettings = SessionCookieOpts{
+			Name: "__Host-session-id",
+			Path: "/",
+		}
+	}
+
+	return m, nil
+}
+
+// Constants for cookie format in the Manager
+const (
+	managerCookieMagic           = "EU1"
+	managerCompressedCookieMagic = "EC1"
+	managerCompressThreshold     = 512
+	managerMaxCookieSize         = 4096
+)
+
+var managerCookieValueEncoding = base64.RawURLEncoding
+
+// Wrap creates middleware that handles session management for each request
+func (m *Manager) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := r.Context().Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T]); ok {
-			// already wrapped for this instance, noop
-			next.ServeHTTP(w, r)
-			return
+		if _, ok := r.Context().Value(sessionContextKey{}).(*Session); ok {
+			panic("session middleware wrapped more than once")
 		}
 
-		sctx := &sessCtx[T]{
-			metadata: &sessionMetadata{
+		// Create new session context with initial metadata
+		sctx := &Session{
+			sessdata: persistedSession{
+				Data:      make(map[string]any),
 				CreatedAt: time.Now(),
 			},
-			data: m.newEmpty(),
 		}
 
-		data, err := m.store.GetSession(r)
+		// Load session data if it exists
+		data, err := m.loadSession(r)
 		if err != nil {
-			m.handleErr(w, r, err)
-			return
-		}
-
-		if data != nil {
-			md, err := m.codec.Decode(data, sctx.data)
+			// Log the error but don't fail the request - just start a new session
+			slog.WarnContext(r.Context(), "Failed to load session, starting a new one", "err", err)
+		} else if data != nil {
+			// Try to decode the data
+			decodedData, err := m.codec.Decode(data)
 			if err != nil {
-				m.handleErr(w, r, err)
-				return
-			}
-			sctx.metadata = md
-			// track the original data if we have an idle timeout, so we can
-			// short path re-save it.
-			if m.opts.IdleTimeout != 0 {
-				sctx.datab = data
-			}
-			if m.opts.Onload != nil {
-				sctx.data = m.opts.Onload(sctx.data)
+				// Log the error but don't fail the request - just start a new session
+				slog.WarnContext(r.Context(), "Failed to decode session data, starting a new session", "err", err)
+			} else {
+				sctx.sessdata = decodedData
+
+				// track the original data for idle timeout handling
+				if m.opts.IdleTimeout != 0 {
+					sctx.datab = data
+				}
+
+				if m.opts.Onload != nil {
+					sctx.sessdata.Data = m.opts.Onload(sctx.sessdata.Data)
+				}
 			}
 		}
 
-		r = r.WithContext(context.WithValue(r.Context(), mgrSessCtxKey[T]{inst: m}, sctx))
+		r = r.WithContext(context.WithValue(r.Context(), sessionContextKey{}, sctx))
 
 		hw := &hookRW{
 			ResponseWriter: w,
@@ -139,91 +226,51 @@ func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 	})
 }
 
-// Get returns a pointer to the current session. exist indicates if an existing
-// session was loaded, otherwise a new session was started
-func (m *Manager[T]) Get(ctx context.Context) (_ T) {
-	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
-	if !ok {
-		panic("context contained no or invalid session")
+// Storage methods
+
+// loadSession retrieves session data from the appropriate storage
+func (m *Manager) loadSession(r *http.Request) ([]byte, error) {
+	cookie, err := r.Cookie(m.cookieSettings.Name)
+	if err != nil {
+		if errors.Is(err, http.ErrNoCookie) {
+			// No session exists
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting cookie %s: %w", m.cookieSettings.Name, err)
 	}
 
-	return sessCtx.data
-}
-
-// Save sets the session data, and marks it to be saved at the end of the
-// request.
-func (m *Manager[T]) Save(ctx context.Context, sess T) {
-	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
-	if !ok {
-		panic("context contained no or invalid session")
+	switch m.storageMode {
+	case storageModeCookie:
+		return m.loadFromCookie(cookie.Value)
+	case storageModeKV:
+		return m.loadFromKV(r.Context(), cookie.Value)
+	default:
+		return nil, fmt.Errorf("unknown storage mode: %v", m.storageMode)
 	}
-	sessCtx.delete = false
-	sessCtx.save = true
-	sessCtx.data = sess
 }
 
-// Delete marks the session for deletion at the end of the request, and discards
-// the current session's data.
-func (m *Manager[T]) Delete(ctx context.Context) {
-	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
-	if !ok {
-		panic("context contained no or invalid session")
-	}
-	sessCtx.datab = nil
-	sessCtx.data = m.newEmpty()
-	sessCtx.delete = true
-	sessCtx.save = false
-	sessCtx.reset = false
-}
-
-// Reset rotates the session ID. Used to avoid session fixation, should be
-// called on privilege elevation. This should be called at the end of a request.
-// If this is not supported by the store, this will no-op.
-func (m *Manager[T]) Reset(ctx context.Context, sess T) {
-	sessCtx, ok := ctx.Value(mgrSessCtxKey[T]{inst: m}).(*sessCtx[T])
-	if !ok {
-		panic("context contained no or invalid session")
-	}
-	sessCtx.data = sess
-	sessCtx.datab = nil
-	sessCtx.save = false
-	sessCtx.delete = false
-	sessCtx.reset = true
-}
-
-func (m *Manager[T]) handleErr(w http.ResponseWriter, r *http.Request, err error) {
-	slog.ErrorContext(r.Context(), "error in session manager", "err", err)
-	http.Error(w, "Internal Error", http.StatusInternalServerError)
-}
-
-func (m *Manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.ResponseWriter) bool {
+func (m *Manager) saveHook(r *http.Request, sctx *Session) func(w http.ResponseWriter) bool {
 	return func(w http.ResponseWriter) bool {
-		sctx.metadata.UpdatedAt = time.Now()
+		// Update the metadata timestamp
+		sctx.sessdata.UpdatedAt = time.Now()
 
-		// if we have delete or reset, delete the session
+		// If we need to delete the session
 		if sctx.delete || sctx.reset {
-			if err := m.store.DeleteSession(w, r); err != nil {
+			if err := m.deleteSession(w, r, sctx); err != nil {
 				m.handleErr(w, r, err)
 				return false
 			}
 		}
 
-		// if we have reset or save, save the session
+		// If we need to save the session
 		if sctx.save || sctx.reset {
-			sb, err := m.codec.Encode(sctx.data, sctx.metadata)
-			if err != nil {
-				m.handleErr(w, r, err)
-				return false
-			}
-
-			if err := m.store.PutSession(w, r, m.calculateExpiry(sctx.metadata), sb); err != nil {
+			if err := m.saveSession(w, r, sctx); err != nil {
 				m.handleErr(w, r, err)
 				return false
 			}
 		} else if m.opts.IdleTimeout != 0 && len(sctx.datab) != 0 {
-			// always need to bump the last access time. If we weren't marked to
-			// save, do this with the original data.
-			if err := m.store.PutSession(w, r, m.calculateExpiry(sctx.metadata), sctx.datab); err != nil {
+			// Just touch the session to update its lifetime
+			if err := m.touchSession(w, r, sctx); err != nil {
 				m.handleErr(w, r, err)
 				return false
 			}
@@ -233,20 +280,113 @@ func (m *Manager[T]) saveHook(r *http.Request, sctx *sessCtx[T]) func(w http.Res
 	}
 }
 
-func (m *Manager[T]) calculateExpiry(md *sessionMetadata) time.Time {
+// saveSession saves the session data to the appropriate storage
+func (m *Manager) saveSession(w http.ResponseWriter, r *http.Request, sctx *Session) error {
+	// Encode session data
+	data, err := m.codec.Encode(sctx.sessdata)
+	if err != nil {
+		return fmt.Errorf("encoding session data: %w", err)
+	}
+
+	// Calculate expiry
+	expiresAt := m.calculateExpiry(sctx.sessdata)
+
+	switch m.storageMode {
+	case storageModeCookie:
+		return m.saveToCookie(w, r, expiresAt, data)
+	case storageModeKV:
+		return m.saveToKV(w, r, sctx, expiresAt, data)
+	default:
+		return fmt.Errorf("unknown storage mode: %v", m.storageMode)
+	}
+}
+
+// deleteSession deletes the session from the appropriate storage
+func (m *Manager) deleteSession(w http.ResponseWriter, r *http.Request, sctx *Session) error {
+	// Delete cookie regardless of storage mode
+	dc := m.cookieSettings.newCookie(time.Time{})
+	dc.MaxAge = -1
+	managerRemoveCookieByName(w, dc.Name)
+	http.SetCookie(w, dc)
+
+	// For KV mode, also delete from KV store
+	if m.storageMode == storageModeKV {
+		sessionID := getManagerSessionIDFromContext(r, m)
+		if sessionID == "" {
+			// Try to get from cookie
+			cookie, err := r.Cookie(m.cookieSettings.Name)
+			if err == nil {
+				sessionID = cookie.Value
+			}
+		}
+
+		if sessionID != "" {
+			storeKey := managerHashSessionID(sessionID)
+			if err := m.kv.Delete(r.Context(), storeKey); err != nil {
+				return fmt.Errorf("deleting from KV: %w", err)
+			}
+		}
+
+		// Generate a new ID for potential future use
+		setManagerSessionIDInContext(r, m, rand.Text())
+	}
+
+	return nil
+}
+
+// touchSession updates the session expiry without modifying content
+func (m *Manager) touchSession(w http.ResponseWriter, r *http.Request, sctx *Session) error {
+	// Calculate new expiry
+	expiresAt := m.calculateExpiry(sctx.sessdata)
+
+	switch m.storageMode {
+	case storageModeCookie:
+		return m.saveToCookie(w, r, expiresAt, sctx.datab)
+	case storageModeKV:
+		// Get session ID
+		sessionID := getManagerSessionIDFromContext(r, m)
+		if sessionID == "" {
+			cookie, err := r.Cookie(m.cookieSettings.Name)
+			if err != nil {
+				return nil // No session to touch
+			}
+			sessionID = cookie.Value
+			setManagerSessionIDInContext(r, m, sessionID)
+		}
+
+		// Update KV expiry
+		storeKey := managerHashSessionID(sessionID)
+		if err := m.kv.Set(r.Context(), storeKey, expiresAt, sctx.datab); err != nil {
+			return fmt.Errorf("updating KV expiry: %w", err)
+		}
+
+		// Update cookie expiry
+		cookie := m.cookieSettings.newCookie(expiresAt)
+		cookie.Value = sessionID
+
+		managerRemoveCookieByName(w, cookie.Name)
+		http.SetCookie(w, cookie)
+
+		return nil
+	default:
+		return fmt.Errorf("unknown storage mode: %v", m.storageMode)
+	}
+}
+
+func (m *Manager) calculateExpiry(sessdata persistedSession) time.Time {
 	var invalidTimes []time.Time
 
 	if m.opts.MaxLifetime != 0 {
-		maxInvalidAt := md.CreatedAt.Add(m.opts.MaxLifetime)
+		maxInvalidAt := sessdata.CreatedAt.Add(m.opts.MaxLifetime)
 		invalidTimes = append(invalidTimes, maxInvalidAt)
 	}
 
 	if m.opts.IdleTimeout != 0 {
 		var idleInvalidAt time.Time
-		if !md.UpdatedAt.IsZero() {
-			idleInvalidAt = md.UpdatedAt.Add(m.opts.IdleTimeout)
+		if !sessdata.UpdatedAt.IsZero() {
+			idleInvalidAt = sessdata.UpdatedAt.Add(m.opts.IdleTimeout)
 		} else {
-			idleInvalidAt = md.CreatedAt.Add(m.opts.IdleTimeout)
+			idleInvalidAt = sessdata.CreatedAt.Add(m.opts.IdleTimeout)
 		}
 		invalidTimes = append(invalidTimes, idleInvalidAt)
 	}
@@ -265,16 +405,45 @@ func (m *Manager[T]) calculateExpiry(md *sessionMetadata) time.Time {
 	return earliestInvalidAt
 }
 
-type mgrSessCtxKey[T any] struct{ inst *Manager[T] }
+// Helper functions for tracking KV-mode session ID in context
+type managerSessionIDCtxKey struct{ manager *Manager }
 
-type sessCtx[T any] struct {
-	metadata *sessionMetadata
-	// data is the actual session data
-	data T
-	// datab is the original loaded data bytes. Used for idle timeout, when a
-	// save may happen without data modification
-	datab  []byte
-	delete bool
-	save   bool
-	reset  bool
+func getManagerSessionIDFromContext(r *http.Request, m *Manager) string {
+	val := r.Context().Value(managerSessionIDCtxKey{manager: m})
+	if val == nil {
+		return ""
+	}
+	return val.(string)
+}
+
+func setManagerSessionIDInContext(r *http.Request, m *Manager, id string) {
+	*r = *r.WithContext(context.WithValue(r.Context(), managerSessionIDCtxKey{manager: m}, id))
+}
+
+// Cookie handling helper
+func managerRemoveCookieByName(w http.ResponseWriter, cookieName string) {
+	headers := w.Header()
+	setCookieHeaders := w.Header()["Set-Cookie"]
+
+	if len(setCookieHeaders) == 0 {
+		return
+	}
+
+	updatedCookies := []string{}
+	for _, cookie := range setCookieHeaders {
+		parts := strings.SplitN(cookie, "=", 2)
+		if len(parts) > 0 && parts[0] != cookieName {
+			updatedCookies = append(updatedCookies, cookie)
+		}
+	}
+
+	headers.Del("Set-Cookie")
+	for _, cookie := range updatedCookies {
+		headers.Add("Set-Cookie", cookie)
+	}
+}
+
+func (m *Manager) handleErr(w http.ResponseWriter, r *http.Request, err error) {
+	slog.ErrorContext(r.Context(), "error in session manager", "err", err)
+	http.Error(w, "Internal Error", http.StatusInternalServerError)
 }

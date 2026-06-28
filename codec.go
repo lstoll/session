@@ -1,105 +1,67 @@
 package session
 
 import (
-	"encoding/json"
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"time"
-
-	sessionv1 "github.com/lstoll/session/internal/proto/lstoll/session/v1"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/anypb"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type codec interface {
-	Encode(data any, md *sessionMetadata) ([]byte, error)
-	Decode(data []byte, into any) (*sessionMetadata, error)
+	// Encode serializes the session data map
+	Encode(sd persistedSession) ([]byte, error)
+
+	// Decode deserializes the session data into a map
+	Decode(data []byte) (persistedSession, error)
 }
 
-var _ codec = (*protoCodec)(nil)
+// gobCodec is a codec that uses Go's gob encoding
+type gobCodec struct{}
 
-type jsonSession struct {
-	Data      json.RawMessage `json:"data"`
-	CreatedAt time.Time       `json:"createdAt"`
-	UpdatedAt time.Time       `json:"updatedAt"`
+var _ codec = (*gobCodec)(nil)
+
+func init() {
+	// register with a fixed name, so renames/refactors don't break existing
+	// data.
+	gob.RegisterName("lds.li/session.persistedSession", persistedSession{})
 }
 
-var _ codec = (*jsonCodec)(nil)
+type flashLevel string
 
-type jsonCodec struct{}
+const (
+	flashLevelNone  flashLevel = ""
+	flashLevelInfo  flashLevel = "info"
+	flashLevelError flashLevel = "error"
+)
 
-func (p *jsonCodec) Encode(data any, md *sessionMetadata) ([]byte, error) {
-	bb, err := json.Marshal(data)
+// persistedSession is the type that codecs are passed to serialize. Changes to
+// this must be forward/backwards compatible. If we ever expose codec, we should
+// think about stability beyond gob.
+type persistedSession struct {
+	Data      map[string]any
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Flash     flashLevel
+	FlashMsg  string
+}
+
+func (g *gobCodec) Encode(sess persistedSession) ([]byte, error) {
+	var buf bytes.Buffer
+
+	if err := gob.NewEncoder(&buf).Encode(sess); err != nil {
+		return nil, fmt.Errorf("encoding session data: %w", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+func (g *gobCodec) Decode(data []byte) (persistedSession, error) {
+	var result persistedSession
+
+	err := gob.NewDecoder(bytes.NewReader(data)).Decode(&result)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling data: %w", err)
+		return persistedSession{}, fmt.Errorf("decoding session data: %w", err)
 	}
 
-	js := jsonSession{
-		Data:      bb,
-		CreatedAt: md.CreatedAt,
-		UpdatedAt: md.UpdatedAt,
-	}
-
-	sb, err := json.Marshal(&js)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling session data: %w", err)
-	}
-
-	return sb, err
-}
-
-func (p *jsonCodec) Decode(data []byte, into any) (*sessionMetadata, error) {
-	var js *jsonSession
-	if err := json.Unmarshal(data, &js); err != nil {
-		return nil, fmt.Errorf("unmarshaling session data: %w", err)
-	}
-
-	if err := json.Unmarshal(js.Data, into); err != nil {
-		return nil, fmt.Errorf("unmarshaling data: %w", err)
-	}
-
-	return &sessionMetadata{
-		CreatedAt: js.CreatedAt,
-	}, nil
-}
-
-type protoCodec struct{}
-
-func (p *protoCodec) Encode(data any, md *sessionMetadata) ([]byte, error) {
-	datapb, ok := data.(proto.Message)
-	if !ok {
-		return nil, fmt.Errorf("failed to convert %T to proto.Message", data)
-	}
-	dataany, err := anypb.New(datapb)
-	if err != nil {
-		return nil, fmt.Errorf("encoding data as any: %w", err)
-	}
-
-	wr := sessionv1.Session_builder{
-		Data:      dataany,
-		CreatedAt: timestamppb.New(md.CreatedAt),
-		UpdatedAt: timestamppb.New(md.UpdatedAt),
-	}.Build()
-
-	return proto.Marshal(wr)
-}
-
-func (p *protoCodec) Decode(data []byte, into any) (*sessionMetadata, error) {
-	intopb, ok := into.(proto.Message)
-	if !ok {
-		return nil, fmt.Errorf("failed to convert %T to proto.Message", into)
-	}
-
-	spb := new(sessionv1.Session)
-	if err := proto.Unmarshal(data, spb); err != nil {
-		return nil, fmt.Errorf("unmarshaling session: %w", err)
-	}
-
-	if err := spb.GetData().UnmarshalTo(intopb); err != nil {
-		return nil, fmt.Errorf("unmarshaling session data: %w", err)
-	}
-
-	return &sessionMetadata{
-		CreatedAt: spb.GetCreatedAt().AsTime(),
-	}, nil
+	return result, nil
 }
