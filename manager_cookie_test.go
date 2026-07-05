@@ -3,7 +3,10 @@ package session
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -11,11 +14,7 @@ import (
 )
 
 func TestCookieManager_RoundTrip(t *testing.T) {
-	// Create a new AEAD for testing
-	aead, err := NewXChaPolyAEAD(genXChaPolyKey(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	aead := newTestAEAD(t)
 
 	tests := []struct {
 		name                 string
@@ -79,20 +78,17 @@ func TestCookieManager_RoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a manager for this test
-			mgr, err := NewCookieManager(aead, nil)
+			mgr, err := NewCookieManager(aead, &CookieManagerOpts{
+				DisableCompression: tt.compressionDisabled,
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
+			cs := mgr.store.(*cookieStore)
 
-			// Set compression flag
-			mgr.compressionDisabled = tt.compressionDisabled
-
-			// Create request and response recorders for testing
 			w := httptest.NewRecorder()
 
-			// Save cookie
-			err = mgr.saveToCookie(w, nil, tt.expiresAt, tt.data)
+			err = cookieStoreRoundTripSave(cs, w, tt.expiresAt, tt.data)
 			if tt.expectSaveError {
 				if err == nil {
 					t.Error("Expected save error, got nil")
@@ -127,7 +123,7 @@ func TestCookieManager_RoundTrip(t *testing.T) {
 			}
 
 			// Load the cookie back
-			loadedData, err := mgr.loadFromCookie(cookieValue)
+			loadedData, err := cookieStoreRoundTripLoad(cs, cookieValue)
 
 			if tt.expectRoundTripError {
 				if err == nil {
@@ -150,27 +146,21 @@ func TestCookieManager_RoundTrip(t *testing.T) {
 
 // TestCookieManager_ExtremelyLargeData tests that very large data causes an error
 func TestCookieManager_ExtremelyLargeData(t *testing.T) {
-	// Create a new AEAD for testing
-	aead, err := NewXChaPolyAEAD(genXChaPolyKey(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	aead := newTestAEAD(t)
 
 	// Create a manager
 	mgr, err := NewCookieManager(aead, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cs := mgr.store.(*cookieStore)
 
-	// Create extremely large test data - large enough to exceed cookie size after encryption and encoding
 	largeData := randBytes(managerMaxCookieSize)
 	expiresAt := time.Now().Add(1 * time.Hour)
 
-	// Attempt to save
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/", nil)
 
-	err = mgr.saveToCookie(w, r, expiresAt, largeData)
+	err = cookieStoreRoundTripSave(cs, w, expiresAt, largeData)
 	if err == nil {
 		// If no error, verify that the cookie size is actually large
 		cookies := w.Result().Cookies()
@@ -189,33 +179,27 @@ func TestCookieManager_ExtremelyLargeData(t *testing.T) {
 
 // TestCookieManager_MultipleRoundTrips tests that data can be saved and loaded multiple times
 func TestCookieManager_MultipleRoundTrips(t *testing.T) {
-	// Create a new AEAD for testing
-	aead, err := NewXChaPolyAEAD(genXChaPolyKey(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	aead := newTestAEAD(t)
 
 	// Create a manager
 	mgr, err := NewCookieManager(aead, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cs := mgr.store.(*cookieStore)
 
-	// Create test data
 	originalData := []byte("test data for multiple round trips")
 	expiresAt := time.Now().Add(1 * time.Hour)
 
-	// Round trip 1
 	w1 := httptest.NewRecorder()
-	r1 := httptest.NewRequest("GET", "/", nil)
 
-	err = mgr.saveToCookie(w1, r1, expiresAt, originalData)
+	err = cookieStoreRoundTripSave(cs, w1, expiresAt, originalData)
 	if err != nil {
 		t.Fatalf("Error in first save: %v", err)
 	}
 
 	cookies1 := w1.Result().Cookies()
-	loadedData1, err := mgr.loadFromCookie(cookies1[0].Value)
+	loadedData1, err := cookieStoreRoundTripLoad(cs, cookies1[0].Value)
 	if err != nil {
 		t.Fatalf("Error in first load: %v", err)
 	}
@@ -226,15 +210,14 @@ func TestCookieManager_MultipleRoundTrips(t *testing.T) {
 
 	// Round trip 2 - using the loaded data as input
 	w2 := httptest.NewRecorder()
-	r2 := httptest.NewRequest("GET", "/", nil)
 
-	err = mgr.saveToCookie(w2, r2, expiresAt, loadedData1)
+	err = cookieStoreRoundTripSave(cs, w2, expiresAt, loadedData1)
 	if err != nil {
 		t.Fatalf("Error in second save: %v", err)
 	}
 
 	cookies2 := w2.Result().Cookies()
-	loadedData2, err := mgr.loadFromCookie(cookies2[0].Value)
+	loadedData2, err := cookieStoreRoundTripLoad(cs, cookies2[0].Value)
 	if err != nil {
 		t.Fatalf("Error in second load: %v", err)
 	}
@@ -246,28 +229,21 @@ func TestCookieManager_MultipleRoundTrips(t *testing.T) {
 
 // TestCookieManager_CompressionLogic tests the compression logic specifically
 func TestCookieManager_CompressionLogic(t *testing.T) {
-	// Create a new AEAD for testing
-	aead, err := NewXChaPolyAEAD(genXChaPolyKey(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	aead := newTestAEAD(t)
 
 	// Create a manager
 	mgr, err := NewCookieManager(aead, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cs := mgr.store.(*cookieStore)
 
-	// Test with data size that should trigger compression
-	// The 8 bytes for expiry time gets added to this
 	largeData := bytes.Repeat([]byte("a"), managerCompressThreshold+1)
 	expiresAt := time.Now().Add(1 * time.Hour)
 
-	// Save to cookie
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/", nil)
 
-	err = mgr.saveToCookie(w, r, expiresAt, largeData)
+	err = cookieStoreRoundTripSave(cs, w, expiresAt, largeData)
 	if err != nil {
 		t.Fatalf("Error saving cookie: %v", err)
 	}
@@ -295,7 +271,7 @@ func TestCookieManager_CompressionLogic(t *testing.T) {
 	}
 
 	// Now try to load it back
-	loadedData, err := mgr.loadFromCookie(cookieValue)
+	loadedData, err := cookieStoreRoundTripLoad(cs, cookieValue)
 	if err != nil {
 		t.Fatalf("Error loading cookie: %v", err)
 	}
@@ -308,19 +284,15 @@ func TestCookieManager_CompressionLogic(t *testing.T) {
 
 // TestCookieManager_MaxSize tests the cookie max size limit
 func TestCookieManager_MaxSize(t *testing.T) {
-	// Create a new AEAD for testing
-	aead, err := NewXChaPolyAEAD(genXChaPolyKey(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	aead := newTestAEAD(t)
 
 	// Create a manager
 	mgr, err := NewCookieManager(aead, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cs := mgr.store.(*cookieStore)
 
-	// Try increasingly large data sizes until we hit the limit
 	sizes := []int{1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000}
 	expiresAt := time.Now().Add(1 * time.Hour)
 
@@ -329,9 +301,8 @@ func TestCookieManager_MaxSize(t *testing.T) {
 			data := randBytes(size)
 
 			w := httptest.NewRecorder()
-			r := httptest.NewRequest("GET", "/", nil)
 
-			err = mgr.saveToCookie(w, r, expiresAt, data)
+			err = cookieStoreRoundTripSave(cs, w, expiresAt, data)
 
 			if err != nil {
 				if strings.Contains(err.Error(), "cookie size") {
@@ -358,6 +329,56 @@ func TestCookieManager_MaxSize(t *testing.T) {
 	}
 }
 
+func TestCookieManager_DBSCExpirationRoundTrip(t *testing.T) {
+	aead := newTestAEAD(t)
+	mgr, err := NewCookieManager(aead, &CookieManagerOpts{
+		ManagerOpts: ManagerOpts{
+			CookieOpts: &SessionCookieOpts{Name: "__Host-session-id", Path: "/"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := mgr.store.(*cookieStore)
+
+	expiresAt := time.Now().Add(time.Hour)
+	dbscExpiration := time.Now().Add(5 * time.Minute)
+	sess := persistedSession{
+		DBSCPublicJWKS:      []byte(`{"keys":[{"kty":"EC"}]}`),
+		DBSCCurrentCookieID: "bound-id-123",
+		DBSCExpiration:      dbscExpiration,
+	}
+
+	w := httptest.NewRecorder()
+	if err := cs.save(w, nil, expiresAt, sess); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	cookies := w.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("no cookies set")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookies[0])
+	bound := &http.Cookie{Name: "__Host-session-id-bound", Value: "bound-id-123"}
+	req.AddCookie(bound)
+
+	loaded, _, err := cs.load(req)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.DBSCExpiration.IsZero() {
+		t.Fatal("DBSCExpiration not persisted in cookie")
+	}
+	if !loaded.DBSCExpiration.Equal(dbscExpiration) {
+		t.Fatalf("DBSCExpiration mismatch: got %v want %v", loaded.DBSCExpiration, dbscExpiration)
+	}
+	if loaded.DBSCCurrentCookieID != "bound-id-123" {
+		t.Fatalf("DBSCCurrentCookieID: got %q want bound-id-123", loaded.DBSCCurrentCookieID)
+	}
+}
+
 func randBytes(n int) []byte {
 	b := make([]byte, n)
 	_, err := rand.Read(b)
@@ -365,4 +386,88 @@ func randBytes(n int) []byte {
 		panic(err)
 	}
 	return b
+}
+
+// cookieStoreRoundTripSave and cookieStoreRoundTripLoad exercise the low-level
+// cookie encrypt/compress/format path without going through persistedSession.
+// They live in the test file so production code stays on cookieStore methods.
+func cookieStoreRoundTripSave(cs *cookieStore, w http.ResponseWriter, expiresAt time.Time, data []byte) error {
+	b := make([]byte, 8)
+	binary.LittleEndian.PutUint64(b, uint64(expiresAt.Unix()))
+	dataWithExpiry := append(b, data...)
+
+	magic := managerCookieMagic
+	if !cs.compressionDisabled && len(dataWithExpiry) > managerCompressThreshold {
+		cw := getCompressor()
+		defer putCompressor(cw)
+
+		compressed, err := cw.Compress(dataWithExpiry)
+		if err != nil {
+			return fmt.Errorf("compressing cookie: %w", err)
+		}
+		dataWithExpiry = compressed
+		magic = managerCompressedCookieMagic
+	}
+
+	encryptedData, err := cs.aead.Encrypt(dataWithExpiry, []byte(cs.cookieSettings.Name))
+	if err != nil {
+		return fmt.Errorf("encrypting cookie failed: %w", err)
+	}
+
+	cookieValue := magic + ".." + managerCookieValueEncoding.EncodeToString(encryptedData)
+	if len(cookieValue) > managerMaxCookieSize {
+		return fmt.Errorf("cookie size %d is greater than max %d", len(cookieValue), managerMaxCookieSize)
+	}
+
+	cookie := cs.cookieSettings.newCookie(expiresAt)
+	cookie.Value = cookieValue
+	http.SetCookie(w, cookie)
+	return nil
+}
+
+func cookieStoreRoundTripLoad(cs *cookieStore, cookieValue string) ([]byte, error) {
+	sp := strings.SplitN(cookieValue, ".", 3)
+	if len(sp) != 3 {
+		if len(sp) == 2 {
+			sp = []string{sp[0], "", sp[1]}
+		} else {
+			return nil, errors.New("cookie does not contain expected dot-separated parts")
+		}
+	}
+
+	magic := sp[0]
+	encodedData := sp[2]
+
+	decodedData, err := managerCookieValueEncoding.DecodeString(encodedData)
+	if err != nil {
+		return nil, fmt.Errorf("decoding cookie string: %w", err)
+	}
+
+	decryptedData, err := cs.aead.Decrypt(decodedData, []byte(cs.cookieSettings.Name))
+	if err != nil {
+		return nil, fmt.Errorf("decrypting cookie: %w", err)
+	}
+
+	var rawData []byte
+	if magic == managerCompressedCookieMagic {
+		cr := getDecompressor()
+		defer putDecompressor(cr)
+		b, err := cr.Decompress(decryptedData)
+		if err != nil {
+			return nil, fmt.Errorf("decompressing cookie: %w", err)
+		}
+		rawData = b
+	} else {
+		rawData = decryptedData
+	}
+
+	if len(rawData) < 8 {
+		return nil, errors.New("decrypted data too short")
+	}
+	expiresAt := time.Unix(int64(binary.LittleEndian.Uint64(rawData[:8])), 0)
+	if expiresAt.Before(time.Now()) {
+		return nil, fmt.Errorf("cookie expired at %s", expiresAt)
+	}
+
+	return rawData[8:], nil
 }

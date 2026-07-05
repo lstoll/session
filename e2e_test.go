@@ -1,7 +1,6 @@
 package session
 
 import (
-	"crypto/rand"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,14 +9,13 @@ import (
 	"net/url"
 	"testing"
 
-	"golang.org/x/crypto/chacha20poly1305"
+	"github.com/tink-crypto/tink-go/v2/aead"
+	"github.com/tink-crypto/tink-go/v2/keyset"
+	"github.com/tink-crypto/tink-go/v2/tink"
 )
 
 func TestE2E(t *testing.T) {
-	aead, err := NewXChaPolyAEAD(genXChaPolyKey(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	aead := newTestAEAD(t)
 
 	t.Run("KV Manager", func(t *testing.T) {
 		mgr, err := NewKVManager(&memoryKV{contents: make(map[string]kvItem)}, nil)
@@ -189,17 +187,22 @@ func assertNoDuplicateCookies(t testing.TB, cookies []*http.Cookie) {
 	}
 }
 
-func genXChaPolyKey() []byte {
-	k := make([]byte, chacha20poly1305.KeySize)
-	if _, err := io.ReadFull(rand.Reader, k); err != nil {
-		panic(err)
-	}
-	return k
-}
-
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(fmt.Sprintf("error: %v", err))
 	}
 	return v
+}
+
+func newTestAEAD(t *testing.T) tink.AEAD {
+	t.Helper()
+	handle, err := keyset.NewHandle(aead.XAES256GCM192BitNonceKeyTemplate())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prim, err := aead.New(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prim
 }

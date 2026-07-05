@@ -1,11 +1,22 @@
 package session
 
 import (
+	"log/slog"
 	"maps"
+	"net/http"
 	"sync"
 )
 
 type sessionContextKey struct{}
+
+// dbscServeConfigKey is used by Manager.Wrap to pass registration path into
+// InitiateDBSCRegistration.
+type dbscServeConfigKey struct{}
+
+type dbscServeConfig struct {
+	RegistrationPath  string
+	GenerateChallenge func(r *http.Request, sctx *Session, isRegister bool) (string, error)
+}
 
 // Session represents a tracked web session.
 type Session struct {
@@ -116,4 +127,37 @@ func (s *Session) SetFlashMessage(message string) {
 	s.sessdata.FlashMsg = message
 	s.sessdata.Flash = flashLevelInfo
 	s.save = true
+}
+
+// IsDeviceBound returns true if the session is cryptographically bound to a device.
+func (s *Session) IsDeviceBound() bool {
+	s.sessdataMu.RLock()
+	defer s.sessdataMu.RUnlock()
+	return len(s.sessdata.DBSCPublicJWKS) > 0
+}
+
+// InitiateDBSCRegistration adds Secure-Session-Registration immediately.
+// When DBSC is enabled, the manager normally attaches this header automatically
+// on the first HTTP response that persists session data (after Set/SetAll), as
+// long as the session is not yet device-bound and has at least one key in Data.
+// Call this if you need a registration offer without that save (e.g. empty Data)
+// or to replace the current pending challenge.
+//
+// Requires DBSCRefreshInterval and DBSCRegistrationPath on the session Manager.
+func (s *Session) InitiateDBSCRegistration(w http.ResponseWriter, r *http.Request) {
+	cfg, ok := r.Context().Value(dbscServeConfigKey{}).(dbscServeConfig)
+	if !ok || cfg.RegistrationPath == "" || cfg.GenerateChallenge == nil {
+		http.Error(w, "DBSC registration not configured on session manager", http.StatusInternalServerError)
+		return
+	}
+
+	challenge, err := cfg.GenerateChallenge(r, s, true)
+	if err != nil {
+		http.Error(w, "failed to generate registration challenge", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Add("Secure-Session-Registration", `(ES256);path="`+cfg.RegistrationPath+`";challenge="`+challenge+`"`)
+	slog.DebugContext(r.Context(), "dbsc InitiateDBSCRegistration",
+		"path", cfg.RegistrationPath, "challenge_len", len(challenge))
 }
