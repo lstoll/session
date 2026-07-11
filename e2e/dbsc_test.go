@@ -83,7 +83,7 @@ func newTestAEAD(t *testing.T) tink.AEAD {
 }
 
 func startDBSCTestServer(t *testing.T, useCookie bool) string {
-	ln, err := net.Listen("tcp", "localhost:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -91,7 +91,7 @@ func startDBSCTestServer(t *testing.T, useCookie bool) string {
 	if err != nil {
 		t.Fatalf("split host port: %v", err)
 	}
-	baseURL := "https://localhost:" + port
+	baseURL := "https://127.0.0.1:" + port
 
 	mgr := newDBSCTestManager(t, useCookie, baseURL)
 
@@ -123,37 +123,17 @@ func startDBSCTestServer(t *testing.T, useCookie bool) string {
 		w.Write([]byte("unbound"))
 	})
 
-	cert, err := localhostTLSCert()
-	if err != nil {
-		t.Fatalf("localhost tls cert: %v", err)
-	}
-	srv := &http.Server{
-		Handler: mgr.Wrap(mux),
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-		},
-	}
-	t.Cleanup(func() { _ = srv.Close() })
-	go func() {
-		tlsLn := tls.NewListener(ln, srv.TLSConfig)
-		if err := srv.Serve(tlsLn); err != nil && err != http.ErrServerClosed {
-			t.Errorf("serve: %v", err)
-		}
-	}()
+	ts := httptest.NewUnstartedServer(mgr.Wrap(mux))
+	ts.Listener = ln
+	ts.StartTLS()
+	t.Cleanup(ts.Close)
 	t.Logf("test server at %s", baseURL)
 
-	preflight, err := http.NewRequest(http.MethodGet, baseURL+"/login", nil)
-	if err != nil {
-		t.Fatalf("preflight request: %v", err)
+	client := ts.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
-	preflightClient := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	preflightResp, err := preflightClient.Do(preflight)
+	preflightResp, err := client.Get(baseURL + "/login")
 	if err != nil {
 		t.Fatalf("preflight get: %v", err)
 	}

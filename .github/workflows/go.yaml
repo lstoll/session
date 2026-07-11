@@ -29,6 +29,29 @@ jobs:
         with:
           version: latest
 
+  dbsce2e:
+    name: DBSC E2E
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: e2e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Setup Chrome
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          install-dependencies: true
+
+      - name: Test
+        env:
+          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: go test -timeout 5m ./...
+
   sessionstoree2e:
     name: Session Store E2E
     runs-on: ubuntu-latest
