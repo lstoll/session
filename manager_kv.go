@@ -66,6 +66,19 @@ func (s *kvStore) parseSessionIDCookie(raw string) (id string, ok bool) {
 	return sp[1], true
 }
 
+func (s *kvStore) peekSessionID(r *http.Request) bool {
+	cookie, err := r.Cookie(s.cookieSettings.Name)
+	if err != nil {
+		return false
+	}
+	sessionID, ok := s.parseSessionIDCookie(cookie.Value)
+	if !ok {
+		return false
+	}
+	setManagerSessionIDInContext(r, s.m, sessionID)
+	return true
+}
+
 func (s *kvStore) load(r *http.Request) (persistedSession, []byte, error) {
 	cookie, err := r.Cookie(s.cookieSettings.Name)
 	if err != nil {

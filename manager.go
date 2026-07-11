@@ -53,6 +53,7 @@ type Manager struct {
 	codec               codec
 	opts                ManagerOpts
 	compressionDisabled bool
+	lazyLoad            bool
 }
 
 var DefaultIdleTimeout = 24 * time.Hour
@@ -120,6 +121,10 @@ type KVManagerOpts struct {
 	// SessionIDMAC authenticates the opaque session ID cookie value. When set,
 	// clients cannot forge session IDs to provoke arbitrary KV lookups or writes.
 	SessionIDMAC tink.MAC
+	// EagerLoad loads session data from the KV store on every request. The default
+	// is lazy loading: peek the session cookie up front and defer the KV Get until
+	// the handler (or a DBSC endpoint) actually needs session state.
+	EagerLoad bool
 }
 
 // NewCookieManager creates a new Manager that stores session data in cookies
@@ -207,6 +212,8 @@ func NewKVManager(kv KV, opts *KVManagerOpts) (*Manager, error) {
 		mac:            optsSessionIDMAC(opts),
 	}
 
+	m.lazyLoad = !optsEagerLoad(opts)
+
 	m.maybeEnableDBSCCookiePersist()
 
 	return m, nil
@@ -217,6 +224,13 @@ func optsSessionIDMAC(opts *KVManagerOpts) tink.MAC {
 		return nil
 	}
 	return opts.SessionIDMAC
+}
+
+func optsEagerLoad(opts *KVManagerOpts) bool {
+	if opts == nil {
+		return false
+	}
+	return opts.EagerLoad
 }
 
 func (m *Manager) maybeEnableDBSCCookiePersist() {
@@ -254,92 +268,64 @@ func (m *Manager) Wrap(next http.Handler) http.Handler {
 
 		// Create new session context with initial metadata
 		sctx := &Session{
+			mgr: m,
 			sessdata: persistedSession{
 				Data:      make(map[string]any),
 				CreatedAt: time.Now(),
 			},
 		}
 
-		// Load session data if it exists
-		decodedData, data, err := m.loadSession(r)
-		if err != nil {
-			// Log the error but don't fail the request - just start a new session
-			slog.WarnContext(r.Context(), "Failed to load session, starting a new one", "err", err)
-		} else if data != nil {
-			sctx.sessdata = decodedData
-
-			// track the original data for idle timeout handling
-			if m.opts.IdleTimeout != 0 {
-				sctx.datab = data
+		if m.lazyLoad {
+			if peeker, ok := m.store.(sessionIDPeeker); ok {
+				peeker.peekSessionID(r)
 			}
-
-			if m.opts.Onload != nil {
-				sctx.sessdata.Data = m.opts.Onload(sctx.sessdata.Data)
+		} else {
+			decodedData, data, err := m.loadSession(r)
+			if err != nil {
+				slog.WarnContext(r.Context(), "Failed to load session, starting a new one", "err", err)
+			} else if data != nil {
+				sctx.sessdata = decodedData
+				if m.opts.IdleTimeout != 0 {
+					sctx.datab = data
+				}
+				if m.opts.Onload != nil {
+					sctx.sessdata.Data = m.opts.Onload(sctx.sessdata.Data)
+				}
 			}
+			sctx.loaded = true
 		}
 
 		dbscEnabled := m.opts.DBSCRefreshInterval > 0
 
-		if dbscEnabled && m.tryHandleDBSCRegistration(w, r, sctx) {
-			return
+		hw := &hookRW{
+			ResponseWriter: w,
+			hook:           m.saveHook(r, sctx),
+			sctx:           sctx,
+		}
+		sctx.reqW = hw
+		sctx.reqR = r
+
+		if dbscEnabled && m.isDBSCRegistrationRequest(r) {
+			if m.ensureSessionLoaded(hw, r, sctx) {
+				return
+			}
+			if m.tryHandleDBSCRegistration(hw, r, sctx) {
+				return
+			}
 		}
 
-		if dbscEnabled && m.tryHandleDBSCRefresh(w, r, sctx) {
-			return
+		if dbscEnabled && m.isDBSCRefreshRequest(r) {
+			if m.ensureSessionLoaded(hw, r, sctx) {
+				return
+			}
+			if m.tryHandleDBSCRefresh(hw, r, sctx) {
+				return
+			}
 		}
 
-		// DBSC Expiration & Challenge Logic
-		if dbscEnabled && len(sctx.sessdata.DBSCPublicJWKS) > 0 {
-			if dbscSessionSkipped(r) {
-				slog.DebugContext(r.Context(), "DBSC challenge skipped: client sent Sec-Secure-Session-Skipped")
-			} else {
-				boundCookie, err := r.Cookie(m.dbscBoundCookieName())
-				isBoundCookieValid := err == nil && boundCookie.Value != "" && boundCookie.Value == sctx.sessdata.DBSCCurrentCookieID
-
-				isExpired := !sctx.sessdata.DBSCExpiration.IsZero() && time.Now().After(sctx.sessdata.DBSCExpiration)
-				if !isBoundCookieValid || isExpired {
-					// Expired or missing bound cookie, we need to challenge or verify the response
-					respHeader := dbscSessionResponseHeader(r)
-					if respHeader == "" {
-						m.dbscIssueInBandChallenge(w, r, sctx)
-						return
-					}
-
-					// Verify the response
-					jti, err := extractDBSCProofJTI(respHeader)
-					if err != nil {
-						slog.WarnContext(r.Context(), "DBSC proof invalid format", "err", err)
-						m.dbscIssueInBandChallenge(w, r, sctx)
-						return
-					}
-
-					if err := m.store.verifyChallenge(r, sctx, jti, false); err != nil {
-						slog.WarnContext(r.Context(), "DBSC challenge verification failed", "err", err)
-						m.dbscIssueInBandChallenge(w, r, sctx)
-						return
-					}
-
-					if err := verifyDBSCResponse(respHeader, sctx.sessdata.DBSCPublicJWKS, jti); err != nil {
-						slog.WarnContext(r.Context(), "DBSC verification failed", "err", err)
-						if err := m.deleteSession(w, r, sctx); err != nil {
-							m.handleErr(w, r, err)
-							return
-						}
-						http.Error(w, "Unauthorized", http.StatusUnauthorized)
-						return
-					}
-
-					// Verification successful
-					sctx.sessdata.DBSCExpiration = time.Now().Add(m.opts.DBSCRefreshInterval)
-					sctx.sessdata.DBSCChallenge = ""
-
-					// Generate new bound cookie value to rotate it
-					sctx.sessdata.DBSCCurrentCookieID = rand.Text()
-					sctx.save = true
-
-					// CRITICAL: Rotate the session ID to permanently invalidate the stolen cookie
-					sctx.Reset()
-				}
+		if dbscEnabled && !m.lazyLoad && len(sctx.sessdata.DBSCPublicJWKS) > 0 {
+			if m.runDBSCInBand(hw, r, sctx) {
+				return
 			}
 		}
 
@@ -351,11 +337,6 @@ func (m *Manager) Wrap(next http.Handler) http.Handler {
 			})
 		}
 		r = r.WithContext(ctx)
-
-		hw := &hookRW{
-			ResponseWriter: w,
-			hook:           m.saveHook(r, sctx),
-		}
 
 		next.ServeHTTP(hw, r)
 
@@ -398,7 +379,7 @@ func (m *Manager) saveHook(r *http.Request, sctx *Session) func(w http.ResponseW
 				m.handleErr(w, r, err)
 				return false
 			}
-		} else if m.opts.IdleTimeout != 0 && len(sctx.datab) != 0 {
+		} else if m.opts.IdleTimeout != 0 && sctx.loaded && len(sctx.datab) != 0 {
 			// Just touch the session to update its lifetime
 			if err := m.touchSession(w, r, sctx); err != nil {
 				m.handleErr(w, r, err)
@@ -737,6 +718,9 @@ func (m *Manager) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request, s
 	}
 	if len(sctx.sessdata.DBSCPublicJWKS) == 0 {
 		http.Error(w, "session not device-bound", http.StatusUnauthorized)
+		return true
+	}
+	if m.rejectDBSCSkipped(w, r) {
 		return true
 	}
 

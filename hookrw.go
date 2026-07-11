@@ -6,7 +6,6 @@ import (
 	"sync"
 )
 
-// ensure we obey the optional unwrap interface stdlib http expects
 var _ interface {
 	http.ResponseWriter
 	Unwrap() http.ResponseWriter
@@ -21,9 +20,13 @@ type hookRW struct {
 	// response because it handled it.
 	hook     func(http.ResponseWriter) bool
 	hookOnce sync.Once
+	sctx     *Session
 }
 
 func (h *hookRW) Write(b []byte) (int, error) {
+	if h.sctx != nil && h.sctx.aborted {
+		return 0, http.ErrAbortHandler
+	}
 	write := true
 	h.hookOnce.Do(func() {
 		write = h.hook(h.ResponseWriter)
@@ -35,6 +38,9 @@ func (h *hookRW) Write(b []byte) (int, error) {
 }
 
 func (h *hookRW) WriteHeader(statusCode int) {
+	if h.sctx != nil && h.sctx.aborted {
+		return
+	}
 	write := true
 	h.hookOnce.Do(func() {
 		write = h.hook(h.ResponseWriter)

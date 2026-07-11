@@ -20,7 +20,10 @@ type dbscServeConfig struct {
 
 // Session represents a tracked web session.
 type Session struct {
-	sessdata   persistedSession
+	mgr      *Manager
+	reqW     http.ResponseWriter
+	reqR     *http.Request
+	sessdata persistedSession
 	sessdataMu sync.RWMutex
 	// datab is the original loaded data bytes. Used for idle timeout, when a
 	// save may happen without data modification
@@ -28,11 +31,29 @@ type Session struct {
 	delete bool
 	save   bool
 	reset  bool
+
+	loaded   bool
+	aborted  bool
+	loadOnce sync.Once
+}
+
+func (s *Session) ensureLoaded() {
+	if s.mgr == nil || s.reqW == nil || s.reqR == nil {
+		return
+	}
+	if s.mgr.ensureSessionLoaded(s.reqW, s.reqR, s) {
+		return
+	}
 }
 
 // Get returns the value for the given key from the session.
 // If the key doesn't exist, it returns nil.
 func (s *Session) Get(key string) any {
+	s.ensureLoaded()
+	if s.aborted {
+		return nil
+	}
+
 	s.sessdataMu.RLock()
 	defer s.sessdataMu.RUnlock()
 
@@ -41,6 +62,11 @@ func (s *Session) Get(key string) any {
 
 // GetAll returns a copy of the session data map.
 func (s *Session) GetAll() map[string]any {
+	s.ensureLoaded()
+	if s.aborted {
+		return nil
+	}
+
 	s.sessdataMu.RLock()
 	defer s.sessdataMu.RUnlock()
 
@@ -49,6 +75,11 @@ func (s *Session) GetAll() map[string]any {
 
 // Set sets a single key-value pair in the session and marks it to be saved.
 func (s *Session) Set(key string, value any) {
+	s.ensureLoaded()
+	if s.aborted {
+		return
+	}
+
 	s.sessdataMu.Lock()
 	defer s.sessdataMu.Unlock()
 
@@ -59,6 +90,11 @@ func (s *Session) Set(key string, value any) {
 
 // SetAll sets the entire session data map and marks it to be saved.
 func (s *Session) SetAll(data map[string]any) {
+	s.ensureLoaded()
+	if s.aborted {
+		return
+	}
+
 	s.sessdataMu.Lock()
 	defer s.sessdataMu.Unlock()
 
@@ -70,6 +106,8 @@ func (s *Session) SetAll(data map[string]any) {
 
 // Delete marks the session for deletion at the end of the request.
 func (s *Session) Delete() {
+	s.ensureLoaded()
+
 	s.sessdataMu.Lock()
 	defer s.sessdataMu.Unlock()
 
@@ -84,6 +122,8 @@ func (s *Session) Delete() {
 
 // Reset rotates the session ID to avoid session fixation.
 func (s *Session) Reset() {
+	s.ensureLoaded()
+
 	s.sessdataMu.Lock()
 	defer s.sessdataMu.Unlock()
 
@@ -95,16 +135,29 @@ func (s *Session) Reset() {
 
 // HasFlash indicates if there is a flash message.
 func (s *Session) HasFlash() bool {
+	s.ensureLoaded()
+	if s.aborted {
+		return false
+	}
 	return s.sessdata.Flash != flashLevelNone
 }
 
 // FlashIsError indicates that the flash message is an error.
 func (s *Session) FlashIsError() bool {
+	s.ensureLoaded()
+	if s.aborted {
+		return false
+	}
 	return s.sessdata.Flash == flashLevelError
 }
 
 // FlashMessage returns the current flash message and clears it.
 func (s *Session) FlashMessage() string {
+	s.ensureLoaded()
+	if s.aborted {
+		return ""
+	}
+
 	flash := s.sessdata.FlashMsg
 	if flash == "" {
 		return ""
@@ -118,12 +171,20 @@ func (s *Session) FlashMessage() string {
 }
 
 func (s *Session) SetFlashError(message string) {
+	s.ensureLoaded()
+	if s.aborted {
+		return
+	}
 	s.sessdata.FlashMsg = message
 	s.sessdata.Flash = flashLevelError
 	s.save = true
 }
 
 func (s *Session) SetFlashMessage(message string) {
+	s.ensureLoaded()
+	if s.aborted {
+		return
+	}
 	s.sessdata.FlashMsg = message
 	s.sessdata.Flash = flashLevelInfo
 	s.save = true
@@ -131,6 +192,11 @@ func (s *Session) SetFlashMessage(message string) {
 
 // IsDeviceBound returns true if the session is cryptographically bound to a device.
 func (s *Session) IsDeviceBound() bool {
+	s.ensureLoaded()
+	if s.aborted {
+		return false
+	}
+
 	s.sessdataMu.RLock()
 	defer s.sessdataMu.RUnlock()
 	return len(s.sessdata.DBSCPublicJWKS) > 0
@@ -145,6 +211,11 @@ func (s *Session) IsDeviceBound() bool {
 //
 // Requires DBSCRefreshInterval and DBSCRegistrationPath on the session Manager.
 func (s *Session) InitiateDBSCRegistration(w http.ResponseWriter, r *http.Request) {
+	s.ensureLoaded()
+	if s.aborted {
+		return
+	}
+
 	cfg, ok := r.Context().Value(dbscServeConfigKey{}).(dbscServeConfig)
 	if !ok || cfg.RegistrationPath == "" || cfg.GenerateChallenge == nil {
 		http.Error(w, "DBSC registration not configured on session manager", http.StatusInternalServerError)

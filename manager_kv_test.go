@@ -64,6 +64,112 @@ func (c *countingKV) setCount() int {
 	return c.sets
 }
 
+func TestKVManager_LazyLoad_skipsKVWithoutSessionAccess(t *testing.T) {
+	ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
+	mgr, err := NewKVManager(ckv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed a session directly in KV.
+	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		MustFromContext(r.Context()).Set("user", "alice")
+		w.WriteHeader(http.StatusOK)
+	}))
+	rrSeed := httptest.NewRecorder()
+	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
+	cookies := rrSeed.Result().Cookies()
+	if ckv.getCount() != 0 {
+		t.Fatalf("seed without cookie should not hit KV, got %d gets", ckv.getCount())
+	}
+	if ckv.setCount() != 1 {
+		t.Fatalf("seed save should write KV once, got %d sets", ckv.setCount())
+	}
+
+	static := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("static"))
+	}))
+	rrStatic := httptest.NewRecorder()
+	reqStatic := httptest.NewRequest(http.MethodGet, "/static/app.js", nil)
+	for _, c := range cookies {
+		reqStatic.AddCookie(c)
+	}
+	static.ServeHTTP(rrStatic, reqStatic)
+	if rrStatic.Code != http.StatusOK {
+		t.Fatalf("static: %d", rrStatic.Code)
+	}
+	if ckv.getCount() != 0 {
+		t.Fatalf("static request should not hit KV, got %d gets", ckv.getCount())
+	}
+	if ckv.setCount() != 1 {
+		t.Fatalf("static request should not touch KV, got %d sets", ckv.setCount())
+	}
+}
+
+func TestKVManager_LazyLoad_loadsOnSessionAccess(t *testing.T) {
+	ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
+	mgr, err := NewKVManager(ckv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		MustFromContext(r.Context()).Set("user", "alice")
+	}))
+	rrSeed := httptest.NewRecorder()
+	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
+	cookies := rrSeed.Result().Cookies()
+
+	app := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if MustFromContext(r.Context()).Get("user") != "alice" {
+			http.Error(w, "missing user", http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	rrApp := httptest.NewRecorder()
+	reqApp := httptest.NewRequest(http.MethodGet, "/me", nil)
+	for _, c := range cookies {
+		reqApp.AddCookie(c)
+	}
+	app.ServeHTTP(rrApp, reqApp)
+	if rrApp.Code != http.StatusOK {
+		t.Fatalf("app: %d", rrApp.Code)
+	}
+	if ckv.getCount() != 1 {
+		t.Fatalf("expected load on session access, got %d gets", ckv.getCount())
+	}
+}
+
+func TestKVManager_EagerLoad_hitsKVOnEveryRequest(t *testing.T) {
+	ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
+	mgr, err := NewKVManager(ckv, &KVManagerOpts{EagerLoad: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		MustFromContext(r.Context()).Set("user", "alice")
+	}))
+	rrSeed := httptest.NewRecorder()
+	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
+	cookies := rrSeed.Result().Cookies()
+
+	static := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rrStatic := httptest.NewRecorder()
+	reqStatic := httptest.NewRequest(http.MethodGet, "/static/app.js", nil)
+	for _, c := range cookies {
+		reqStatic.AddCookie(c)
+	}
+	static.ServeHTTP(rrStatic, reqStatic)
+	if ckv.getCount() != 1 {
+		t.Fatalf("eager load should hit KV on cookie-bearing request, got %d gets", ckv.getCount())
+	}
+}
+
 func TestKVManager_SessionIDMAC_roundTrip(t *testing.T) {
 	kv := &memoryKV{contents: make(map[string]kvItem)}
 	mgr, err := NewKVManager(kv, &KVManagerOpts{

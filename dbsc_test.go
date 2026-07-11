@@ -81,6 +81,9 @@ func TestDBSC(t *testing.T) {
 		t.Run("in_band_challenge", func(t *testing.T) {
 			testDBSCInBandChallenge(t, time.Millisecond, false)
 		})
+		t.Run("skipped_header_rejected", func(t *testing.T) {
+			testDBSCSkippedRejected(t, false)
+		})
 		t.Run("registration_chrome_jwk", func(t *testing.T) {
 			testDBSCRegistrationChromeJWK(t, false)
 		})
@@ -97,6 +100,9 @@ func TestDBSC(t *testing.T) {
 		})
 		t.Run("in_band_challenge", func(t *testing.T) {
 			testDBSCInBandChallenge(t, time.Millisecond, true)
+		})
+		t.Run("skipped_header_rejected", func(t *testing.T) {
+			testDBSCSkippedRejected(t, true)
 		})
 		t.Run("registration_chrome_jwk", func(t *testing.T) {
 			testDBSCRegistrationChromeJWK(t, true)
@@ -273,6 +279,37 @@ func testDBSCRefreshEndpoint(t *testing.T, refreshInterval time.Duration, useCoo
 	}
 }
 
+func testDBSCSkippedRejected(t *testing.T, useCookie bool) {
+	t.Helper()
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute, useCookie)
+
+	_, dbscSessionID, cookies := completeDBSCRegistration(t, handler, privKey, nil)
+
+	t.Run("in_band", func(t *testing.T) {
+		req := newTestRequest(http.MethodGet, "/protected", nil)
+		addCookies(req, cookies)
+		req.Header.Set("Sec-Secure-Session-Skipped", "?1")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("in-band with Sec-Secure-Session-Skipped: got %v want 401", rr.Code)
+		}
+	})
+
+	t.Run("refresh", func(t *testing.T) {
+		req := newTestRequest(http.MethodPost, "/dbsc/refresh", nil)
+		addCookies(req, cookies)
+		req.Header.Set("Sec-Secure-Session-Id", `"`+dbscSessionID+`"`)
+		req.Header.Set("Sec-Secure-Session-Skipped", "?1")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("refresh with Sec-Secure-Session-Skipped: got %v want 401", rr.Code)
+		}
+	})
+}
+
 func testDBSCInBandChallenge(t *testing.T, refreshInterval time.Duration, useCookie bool) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}
@@ -380,6 +417,10 @@ func setupDBSCHandler(t *testing.T, kv *memoryKV, refreshInterval time.Duration,
 			sess.Set("bootstrap", "1")
 			w.WriteHeader(http.StatusOK)
 		default:
+			if sess.Get("bootstrap") == nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ok"))
 		}
