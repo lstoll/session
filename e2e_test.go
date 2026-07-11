@@ -25,6 +25,16 @@ func TestE2E(t *testing.T) {
 		runE2ETest(t, mgr, true)
 	})
 
+	t.Run("KV Manager with session ID MAC", func(t *testing.T) {
+		mgr, err := NewKVManager(&memoryKV{contents: make(map[string]kvItem)}, &KVManagerOpts{
+			SessionIDMAC: newTestMAC(t),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runE2ETest(t, mgr, true)
+	})
+
 	t.Run("Cookie Manager", func(t *testing.T) {
 		mgr, err := NewCookieManager(aead, nil)
 		if err != nil {

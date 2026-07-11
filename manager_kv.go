@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/tink-crypto/tink-go/v2/tink"
 )
 
 type KV interface {
@@ -17,11 +20,50 @@ type KV interface {
 	Delete(_ context.Context, key string) error
 }
 
+const managerMACSessionCookieMagic = "MS1"
+
 type kvStore struct {
 	m              *Manager
 	kv             KV
 	codec          codec
 	cookieSettings SessionCookieOpts
+	mac            tink.MAC
+}
+
+func (s *kvStore) sessionIDMACInput(id string) []byte {
+	return []byte(s.cookieSettings.Name + ":" + id)
+}
+
+func (s *kvStore) signSessionID(id string) (string, error) {
+	if s.mac == nil {
+		return id, nil
+	}
+	tag, err := s.mac.ComputeMAC(s.sessionIDMACInput(id))
+	if err != nil {
+		return "", fmt.Errorf("signing session id: %w", err)
+	}
+	return managerMACSessionCookieMagic + "." + id + "." + managerCookieValueEncoding.EncodeToString(tag), nil
+}
+
+func (s *kvStore) parseSessionIDCookie(raw string) (id string, ok bool) {
+	if s.mac == nil {
+		if raw == "" {
+			return "", false
+		}
+		return raw, true
+	}
+	sp := strings.SplitN(raw, ".", 3)
+	if len(sp) != 3 || sp[0] != managerMACSessionCookieMagic || sp[1] == "" || sp[2] == "" {
+		return "", false
+	}
+	tag, err := managerCookieValueEncoding.DecodeString(sp[2])
+	if err != nil {
+		return "", false
+	}
+	if err := s.mac.VerifyMAC(tag, s.sessionIDMACInput(sp[1])); err != nil {
+		return "", false
+	}
+	return sp[1], true
 }
 
 func (s *kvStore) load(r *http.Request) (persistedSession, []byte, error) {
@@ -33,7 +75,10 @@ func (s *kvStore) load(r *http.Request) (persistedSession, []byte, error) {
 		return persistedSession{}, nil, fmt.Errorf("getting cookie %s: %w", s.cookieSettings.Name, err)
 	}
 
-	sessionID := cookie.Value
+	sessionID, ok := s.parseSessionIDCookie(cookie.Value)
+	if !ok {
+		return persistedSession{}, nil, nil
+	}
 	setManagerSessionIDInContext(r, s.m, sessionID)
 
 	// Hash the session ID for storage
@@ -81,8 +126,12 @@ func (s *kvStore) save(w http.ResponseWriter, r *http.Request, expiresAt time.Ti
 	}
 
 	// Set session ID cookie
+	cookieValue, err := s.signSessionID(sessionID)
+	if err != nil {
+		return err
+	}
 	cookie := s.cookieSettings.newCookie(expiresAt)
-	cookie.Value = sessionID
+	cookie.Value = cookieValue
 
 	managerRemoveCookieByName(w, cookie.Name)
 	http.SetCookie(w, cookie)
@@ -96,7 +145,9 @@ func (s *kvStore) delete(w http.ResponseWriter, r *http.Request) error {
 		// Try to get from cookie
 		cookie, err := r.Cookie(s.cookieSettings.Name)
 		if err == nil {
-			sessionID = cookie.Value
+			if id, ok := s.parseSessionIDCookie(cookie.Value); ok {
+				sessionID = id
+			}
 		}
 	}
 
@@ -121,7 +172,10 @@ func (s *kvStore) touch(w http.ResponseWriter, r *http.Request, expiresAt time.T
 		if err != nil {
 			return nil // No session to touch
 		}
-		sessionID = cookie.Value
+		sessionID, ok := s.parseSessionIDCookie(cookie.Value)
+		if !ok {
+			return nil
+		}
 		setManagerSessionIDInContext(r, s.m, sessionID)
 	}
 
@@ -132,8 +186,12 @@ func (s *kvStore) touch(w http.ResponseWriter, r *http.Request, expiresAt time.T
 	}
 
 	// Update cookie expiry
+	cookieValue, err := s.signSessionID(sessionID)
+	if err != nil {
+		return err
+	}
 	cookie := s.cookieSettings.newCookie(expiresAt)
-	cookie.Value = sessionID
+	cookie.Value = cookieValue
 
 	managerRemoveCookieByName(w, cookie.Name)
 	http.SetCookie(w, cookie)

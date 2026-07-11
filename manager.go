@@ -117,6 +117,9 @@ type CookieManagerOpts struct {
 // KVManagerOpts configures options specifically for the KV-based session manager
 type KVManagerOpts struct {
 	ManagerOpts
+	// SessionIDMAC authenticates the opaque session ID cookie value. When set,
+	// clients cannot forge session IDs to provoke arbitrary KV lookups or writes.
+	SessionIDMAC tink.MAC
 }
 
 // NewCookieManager creates a new Manager that stores session data in cookies
@@ -201,11 +204,19 @@ func NewKVManager(kv KV, opts *KVManagerOpts) (*Manager, error) {
 		kv:             kv,
 		codec:          m.codec,
 		cookieSettings: m.cookieSettings,
+		mac:            optsSessionIDMAC(opts),
 	}
 
 	m.maybeEnableDBSCCookiePersist()
 
 	return m, nil
+}
+
+func optsSessionIDMAC(opts *KVManagerOpts) tink.MAC {
+	if opts == nil {
+		return nil
+	}
+	return opts.SessionIDMAC
 }
 
 func (m *Manager) maybeEnableDBSCCookiePersist() {
