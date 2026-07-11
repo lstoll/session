@@ -11,27 +11,67 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tink-crypto/tink-go/v2/tink"
 )
 
-// FromContext returns the Session from the given context. It panics if no
-// session exists in the context.
-func FromContext(ctx context.Context) (*Session, bool) {
-	sessCtx, ok := ctx.Value(sessionContextKey{}).(*Session)
-	if !ok {
-		return nil, false
+var (
+	managerRegistryMu  sync.Mutex
+	registeredManagers []*Manager
+)
+
+func registerManager(m *Manager) {
+	managerRegistryMu.Lock()
+	defer managerRegistryMu.Unlock()
+	for _, existing := range registeredManagers {
+		if existing == m {
+			return
+		}
 	}
-	return sessCtx, true
+	registeredManagers = append(registeredManagers, m)
 }
 
-// MustFromContext returns the Session from the given context. It panics if no
-// session exists in the context.
-func MustFromContext(ctx context.Context) *Session {
-	sess, ok := FromContext(ctx)
+func singletonManager() (*Manager, bool) {
+	managerRegistryMu.Lock()
+	defer managerRegistryMu.Unlock()
+	switch len(registeredManagers) {
+	case 0:
+		return nil, false
+	case 1:
+		return registeredManagers[0], true
+	default:
+		return nil, false
+	}
+}
+
+// FromContext returns the Session installed by the sole registered Manager.
+// It panics if multiple Managers are registered, or if no session is in context.
+// When no Manager is registered, it falls back to sessions attached via TestContext.
+func FromContext(ctx context.Context) *Session {
+	m, ok := singletonManager()
+	if ok {
+		return m.FromContext(ctx)
+	}
+	managerRegistryMu.Lock()
+	n := len(registeredManagers)
+	managerRegistryMu.Unlock()
+	if n > 1 {
+		panic("session: multiple Managers registered; use Manager.FromContext")
+	}
+	if sess, ok := ctx.Value(testSessionContextKey{}).(*Session); ok {
+		return sess
+	}
+	panic("no session in context")
+}
+
+// FromContext returns the Session this Manager stored in ctx.
+// It panics if this Manager did not install a session in ctx.
+func (m *Manager) FromContext(ctx context.Context) *Session {
+	sess, ok := ctx.Value(sessionContextKey{manager: m}).(*Session)
 	if !ok {
-		panic("no session in context")
+		panic("no session in context for this Manager")
 	}
 	return sess
 }
@@ -147,8 +187,8 @@ func NewCookieManager(aead tink.AEAD, opts *CookieManagerOpts) (*Manager, error)
 	if m.opts.IdleTimeout == 0 && m.opts.MaxLifetime == 0 {
 		return nil, errors.New("at least one of idle timeout or max lifetime must be specified")
 	}
-	if err := validateDBSCOpts(m.opts); err != nil {
-		return nil, err
+	if m.opts.DBSCRefreshInterval != 0 {
+		return nil, errors.New("DBSC requires a KV-backed session manager")
 	}
 
 	// Set cookie options
@@ -167,6 +207,8 @@ func NewCookieManager(aead tink.AEAD, opts *CookieManagerOpts) (*Manager, error)
 		compressionDisabled: m.compressionDisabled,
 		cookieSettings:      m.cookieSettings,
 	}
+
+	registerManager(m)
 
 	return m, nil
 }
@@ -214,7 +256,7 @@ func NewKVManager(kv KV, opts *KVManagerOpts) (*Manager, error) {
 
 	m.lazyLoad = !optsEagerLoad(opts)
 
-	m.maybeEnableDBSCCookiePersist()
+	registerManager(m)
 
 	return m, nil
 }
@@ -231,12 +273,6 @@ func optsEagerLoad(opts *KVManagerOpts) bool {
 		return false
 	}
 	return opts.EagerLoad
-}
-
-func (m *Manager) maybeEnableDBSCCookiePersist() {
-	if m.opts.DBSCRefreshInterval > 0 && m.opts.CookieOpts == nil {
-		m.cookieSettings.Persist = true
-	}
 }
 
 func validateDBSCOpts(opts ManagerOpts) error {
@@ -262,13 +298,14 @@ var managerCookieValueEncoding = base64.RawURLEncoding
 // Wrap creates middleware that handles session management for each request
 func (m *Manager) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := r.Context().Value(sessionContextKey{}).(*Session); ok {
-			panic("session middleware wrapped more than once")
+		if _, ok := r.Context().Value(sessionContextKey{manager: m}).(*Session); ok {
+			panic("session middleware wrapped more than once for this Manager")
 		}
 
 		// Create new session context with initial metadata
 		sctx := &Session{
-			mgr: m,
+			mgr:   m,
+			isNew: true,
 			sessdata: persistedSession{
 				Data:      make(map[string]any),
 				CreatedAt: time.Now(),
@@ -285,6 +322,7 @@ func (m *Manager) Wrap(next http.Handler) http.Handler {
 				slog.WarnContext(r.Context(), "Failed to load session, starting a new one", "err", err)
 			} else if data != nil {
 				sctx.sessdata = decodedData
+				sctx.isNew = false
 				if m.opts.IdleTimeout != 0 {
 					sctx.datab = data
 				}
@@ -329,7 +367,7 @@ func (m *Manager) Wrap(next http.Handler) http.Handler {
 			}
 		}
 
-		ctx := context.WithValue(r.Context(), sessionContextKey{}, sctx)
+		ctx := context.WithValue(r.Context(), sessionContextKey{manager: m}, sctx)
 		if dbscEnabled {
 			ctx = context.WithValue(ctx, dbscServeConfigKey{}, dbscServeConfig{
 				RegistrationPath:  m.dbscRegistrationPath(),

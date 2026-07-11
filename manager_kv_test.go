@@ -73,7 +73,7 @@ func TestKVManager_LazyLoad_skipsKVWithoutSessionAccess(t *testing.T) {
 
 	// Seed a session directly in KV.
 	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		MustFromContext(r.Context()).Set("user", "alice")
+		mgr.FromContext(r.Context()).Set("user", "alice")
 		w.WriteHeader(http.StatusOK)
 	}))
 	rrSeed := httptest.NewRecorder()
@@ -115,14 +115,14 @@ func TestKVManager_LazyLoad_loadsOnSessionAccess(t *testing.T) {
 	}
 
 	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		MustFromContext(r.Context()).Set("user", "alice")
+		mgr.FromContext(r.Context()).Set("user", "alice")
 	}))
 	rrSeed := httptest.NewRecorder()
 	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
 	cookies := rrSeed.Result().Cookies()
 
 	app := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if MustFromContext(r.Context()).Get("user") != "alice" {
+		if mgr.FromContext(r.Context()).Get("user") != "alice" {
 			http.Error(w, "missing user", http.StatusUnauthorized)
 			return
 		}
@@ -150,7 +150,7 @@ func TestKVManager_EagerLoad_hitsKVOnEveryRequest(t *testing.T) {
 	}
 
 	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		MustFromContext(r.Context()).Set("user", "alice")
+		mgr.FromContext(r.Context()).Set("user", "alice")
 	}))
 	rrSeed := httptest.NewRecorder()
 	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
@@ -180,7 +180,7 @@ func TestKVManager_SessionIDMAC_roundTrip(t *testing.T) {
 	}
 
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sess := MustFromContext(r.Context())
+		sess := mgr.FromContext(r.Context())
 		switch r.URL.Path {
 		case "/set":
 			sess.Set("user", "alice")
@@ -234,7 +234,7 @@ func TestKVManager_SessionIDMAC_rejectsForgedCookie(t *testing.T) {
 	forgedKey := managerHashSessionID(forgedID)
 
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		MustFromContext(r.Context()).Set("k", "v")
+		mgr.FromContext(r.Context()).Set("k", "v")
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -288,7 +288,7 @@ func TestKVManager_withoutSessionIDMAC_acceptsBareCookie(t *testing.T) {
 
 	bareID := "BARESESSIONIDBARESESSIONIDBARESESS"
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		MustFromContext(r.Context()).Set("k", "v")
+		mgr.FromContext(r.Context()).Set("k", "v")
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -300,4 +300,115 @@ func TestKVManager_withoutSessionIDMAC_acceptsBareCookie(t *testing.T) {
 	if _, ok := kv.contents[managerHashSessionID(bareID)]; !ok {
 		t.Fatal("without MAC, bare cookie value is used as session id")
 	}
+}
+
+func TestSession_IsNew(t *testing.T) {
+	t.Run("lazy until loaded", func(t *testing.T) {
+		ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
+		mgr, err := NewKVManager(ckv, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var cookies []*http.Cookie
+		seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sess := mgr.FromContext(r.Context())
+			if !sess.IsNew() {
+				t.Fatal("first visit should be new")
+			}
+			sess.Set("user", "alice")
+		}))
+		rrSeed := httptest.NewRecorder()
+		seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
+		cookies = rrSeed.Result().Cookies()
+
+		static := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !mgr.FromContext(r.Context()).IsNew() {
+				t.Fatal("lazy static route should stay new without session access")
+			}
+		}))
+		reqStatic := httptest.NewRequest(http.MethodGet, "/static", nil)
+		for _, c := range cookies {
+			reqStatic.AddCookie(c)
+		}
+		rrStatic := httptest.NewRecorder()
+		static.ServeHTTP(rrStatic, reqStatic)
+
+		load := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sess := mgr.FromContext(r.Context())
+			if sess.Get("user") != "alice" {
+				t.Fatalf("got %v", sess.Get("user"))
+			}
+			if sess.IsNew() {
+				t.Fatal("returning visit should not be new after load")
+			}
+		}))
+		reqLoad := httptest.NewRequest(http.MethodGet, "/load", nil)
+		for _, c := range cookies {
+			reqLoad.AddCookie(c)
+		}
+		rrLoad := httptest.NewRecorder()
+		load.ServeHTTP(rrLoad, reqLoad)
+	})
+
+	t.Run("eager returning visit", func(t *testing.T) {
+		kv := &memoryKV{contents: make(map[string]kvItem)}
+		mgr, err := NewKVManager(kv, &KVManagerOpts{EagerLoad: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var cookies []*http.Cookie
+		seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mgr.FromContext(r.Context()).Set("k", "v")
+		}))
+		rrSeed := httptest.NewRecorder()
+		seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/", nil))
+		cookies = rrSeed.Result().Cookies()
+
+		returning := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if mgr.FromContext(r.Context()).IsNew() {
+				t.Fatal("eager load should restore existing session")
+			}
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		for _, c := range cookies {
+			req.AddCookie(c)
+		}
+		rr := httptest.NewRecorder()
+		returning.ServeHTTP(rr, req)
+	})
+
+	t.Run("reset", func(t *testing.T) {
+		kv := &memoryKV{contents: make(map[string]kvItem)}
+		mgr, err := NewKVManager(kv, &KVManagerOpts{EagerLoad: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var cookies []*http.Cookie
+		seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mgr.FromContext(r.Context()).Set("k", "v")
+		}))
+		rrSeed := httptest.NewRecorder()
+		seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/", nil))
+		cookies = rrSeed.Result().Cookies()
+
+		reset := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sess := mgr.FromContext(r.Context())
+			if sess.IsNew() {
+				t.Fatal("loaded session should not be new")
+			}
+			sess.Reset()
+			if !sess.IsNew() {
+				t.Fatal("reset should mark session new")
+			}
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		for _, c := range cookies {
+			req.AddCookie(c)
+		}
+		rr := httptest.NewRecorder()
+		reset.ServeHTTP(rr, req)
+	})
 }

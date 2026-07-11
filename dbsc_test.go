@@ -94,29 +94,6 @@ func TestDBSC(t *testing.T) {
 			testDBSCRegistrationCrossSiteRejected(t, false)
 		})
 	})
-	t.Run("Cookie Store", func(t *testing.T) {
-		t.Run("refresh_endpoint", func(t *testing.T) {
-			testDBSCRefreshEndpoint(t, 5*time.Minute, true)
-		})
-		t.Run("in_band_challenge", func(t *testing.T) {
-			testDBSCInBandChallenge(t, time.Millisecond, true)
-		})
-		t.Run("skipped_header_rejected", func(t *testing.T) {
-			testDBSCSkippedRejected(t, true)
-		})
-		t.Run("registration_chrome_jwk", func(t *testing.T) {
-			testDBSCRegistrationChromeJWK(t, true)
-		})
-		t.Run("registration_challenge_session_bound", func(t *testing.T) {
-			testDBSCRegistrationChallengeSessionBound(t, true)
-		})
-		t.Run("registration_stale_iat_rejected", func(t *testing.T) {
-			testDBSCRegistrationStaleIATRejected(t, true)
-		})
-		t.Run("registration_cross_site_rejected", func(t *testing.T) {
-			testDBSCRegistrationCrossSiteRejected(t, true)
-		})
-	})
 }
 
 func testDBSCRegistrationCrossSiteRejected(t *testing.T, useCookie bool) {
@@ -408,10 +385,7 @@ func setupDBSCHandler(t *testing.T, kv *memoryKV, refreshInterval time.Duration,
 		t.Fatalf("generating key: %v", err)
 	}
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sess, ok := FromContext(r.Context())
-		if !ok {
-			t.Fatal("no session in context")
-		}
+		sess := mgr.FromContext(r.Context())
 		switch r.URL.Path {
 		case "/start":
 			sess.Set("bootstrap", "1")

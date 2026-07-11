@@ -15,9 +15,6 @@ import (
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
-	"github.com/tink-crypto/tink-go/v2/aead"
-	"github.com/tink-crypto/tink-go/v2/keyset"
-	"github.com/tink-crypto/tink-go/v2/tink"
 	"lds.li/session"
 )
 
@@ -47,42 +44,17 @@ func TestDBSC_E2E(t *testing.T) {
 		t.Skip("DBSC e2e needs Google Chrome on macOS or Windows (set CHROME_PATH to override)")
 	}
 
-	tests := []struct {
-		name      string
-		useCookie bool
-	}{
-		{name: "KV_Store", useCookie: false},
-		{name: "Cookie_Store", useCookie: true},
+	baseURL := os.Getenv("DBSC_TEST_URL")
+	if baseURL == "" {
+		baseURL = startDBSCTestServer(t)
+	} else {
+		t.Logf("using external DBSC test server at %s", baseURL)
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			baseURL := os.Getenv("DBSC_TEST_URL")
-			if baseURL == "" {
-				baseURL = startDBSCTestServer(t, tc.useCookie)
-			} else {
-				t.Logf("using external DBSC test server at %s", baseURL)
-			}
-
-			runDBSCChromeFlow(t, baseURL)
-		})
-	}
+	runDBSCChromeFlow(t, baseURL)
 }
 
-func newTestAEAD(t *testing.T) tink.AEAD {
-	t.Helper()
-	handle, err := keyset.NewHandle(aead.XAES256GCM192BitNonceKeyTemplate())
-	if err != nil {
-		t.Fatal(err)
-	}
-	prim, err := aead.New(handle)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return prim
-}
-
-func startDBSCTestServer(t *testing.T, useCookie bool) string {
+func startDBSCTestServer(t *testing.T) string {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -93,18 +65,18 @@ func startDBSCTestServer(t *testing.T, useCookie bool) string {
 	}
 	baseURL := "https://127.0.0.1:" + port
 
-	mgr := newDBSCTestManager(t, useCookie, baseURL)
+	mgr := newDBSCTestManager(t, baseURL)
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
-		sess := session.MustFromContext(r.Context())
+		sess := mgr.FromContext(r.Context())
 		sess.Set("user", "alice")
 		http.Redirect(w, r, "/protected", http.StatusSeeOther)
 	})
 
 	mux.HandleFunc("/protected", func(w http.ResponseWriter, r *http.Request) {
-		sess := session.MustFromContext(r.Context())
+		sess := mgr.FromContext(r.Context())
 		if sess.Get("user") != "alice" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -115,7 +87,7 @@ func startDBSCTestServer(t *testing.T, useCookie bool) string {
 		}
 	})
 	mux.HandleFunc("/bound", func(w http.ResponseWriter, r *http.Request) {
-		sess := session.MustFromContext(r.Context())
+		sess := mgr.FromContext(r.Context())
 		if sess.IsDeviceBound() {
 			w.Write([]byte("bound"))
 			return
@@ -145,31 +117,8 @@ func startDBSCTestServer(t *testing.T, useCookie bool) string {
 	return baseURL
 }
 
-func newDBSCTestManager(t *testing.T, useCookie bool, origin string) *session.Manager {
+func newDBSCTestManager(t *testing.T, origin string) *session.Manager {
 	t.Helper()
-	if useCookie {
-		opts := &session.CookieManagerOpts{
-			ManagerOpts: session.ManagerOpts{
-				IdleTimeout:          1 * time.Hour,
-				DBSCRefreshInterval:  5 * time.Minute,
-				DBSCRegistrationPath: "/register",
-				DBSCRefreshPath:      "/dbsc/refresh",
-				DBSCOrigin:           origin,
-				CookieOpts: &session.SessionCookieOpts{
-					Name:    "__Host-session",
-					Path:    "/",
-					Persist: true,
-				},
-			},
-		}
-		aeadKey := newTestAEAD(t)
-		mgr, err := session.NewCookieManager(aeadKey, opts)
-		if err != nil {
-			t.Fatalf("failed to create cookie manager: %v", err)
-		}
-		return mgr
-	}
-
 	kv := session.NewMemoryKV()
 	opts := &session.KVManagerOpts{
 		ManagerOpts: session.ManagerOpts{
@@ -264,8 +213,7 @@ func TestLoginResponseIncludesSecureSessionRegistration(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
-		s := session.MustFromContext(r.Context())
-		s.Set("u", 1)
+		mgr.FromContext(r.Context()).Set("u", 1)
 		w.Write([]byte("ok"))
 	})
 	ts := httptest.NewTLSServer(mgr.Wrap(mux))

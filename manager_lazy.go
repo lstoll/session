@@ -41,6 +41,7 @@ func (m *Manager) ensureSessionLoaded(w http.ResponseWriter, r *http.Request, sc
 			slog.WarnContext(r.Context(), "Failed to load session, starting a new one", "err", err)
 		} else if data != nil {
 			sctx.sessdata = decodedData
+			sctx.isNew = false
 			if m.opts.IdleTimeout != 0 {
 				sctx.datab = data
 			}

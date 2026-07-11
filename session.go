@@ -7,7 +7,12 @@ import (
 	"sync"
 )
 
-type sessionContextKey struct{}
+type sessionContextKey struct {
+	manager *Manager
+}
+
+// testSessionContextKey is used only by TestContext; it is not manager-scoped.
+type testSessionContextKey struct{}
 
 // dbscServeConfigKey is used by Manager.Wrap to pass registration path into
 // InitiateDBSCRegistration.
@@ -32,9 +37,24 @@ type Session struct {
 	save   bool
 	reset  bool
 
+	isNew    bool
 	loaded   bool
 	aborted  bool
 	loadOnce sync.Once
+}
+
+// IsNew reports whether persisted session data has not been loaded from storage.
+// It is true for brand-new sessions and after Reset or Delete. On lazy-loaded
+// managers, it stays true until a session accessor (Get, Set, etc.) triggers
+// the store read.
+func (s *Session) IsNew() bool {
+	if s.aborted {
+		return s.isNew
+	}
+
+	s.sessdataMu.RLock()
+	defer s.sessdataMu.RUnlock()
+	return s.isNew
 }
 
 func (s *Session) ensureLoaded() {
@@ -115,6 +135,7 @@ func (s *Session) Delete() {
 	s.sessdata = persistedSession{
 		Data: make(map[string]any),
 	}
+	s.isNew = true
 	s.delete = true
 	s.save = false
 	s.reset = false
@@ -131,6 +152,7 @@ func (s *Session) Reset() {
 	s.save = false
 	s.delete = false
 	s.reset = true
+	s.isNew = true
 }
 
 // HasFlash indicates if there is a flash message.

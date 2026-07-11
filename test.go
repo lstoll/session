@@ -31,11 +31,12 @@ func (t *TestResult) Result() map[string]any {
 func TestContext(ctx context.Context, s *Session) (context.Context, *TestResult) {
 	if s == nil {
 		s = &Session{
+			isNew: true,
 			sessdata: persistedSession{
 				Data:      make(map[string]any),
 				CreatedAt: time.Now(),
 			},
 		}
 	}
-	return context.WithValue(ctx, sessionContextKey{}, s), nil
+	return context.WithValue(ctx, testSessionContextKey{}, s), &TestResult{ctx: s}
 }

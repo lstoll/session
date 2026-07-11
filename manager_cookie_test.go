@@ -329,53 +329,17 @@ func TestCookieManager_MaxSize(t *testing.T) {
 	}
 }
 
-func TestCookieManager_DBSCExpirationRoundTrip(t *testing.T) {
+func TestCookieManagerRejectsDBSC(t *testing.T) {
 	aead := newTestAEAD(t)
-	mgr, err := NewCookieManager(aead, &CookieManagerOpts{
+	_, err := NewCookieManager(aead, &CookieManagerOpts{
 		ManagerOpts: ManagerOpts{
-			CookieOpts: &SessionCookieOpts{Name: "__Host-session-id", Path: "/"},
+			IdleTimeout:         time.Hour,
+			DBSCRefreshInterval: 5 * time.Minute,
+			DBSCOrigin:          "https://example.test",
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cs := mgr.store.(*cookieStore)
-
-	expiresAt := time.Now().Add(time.Hour)
-	dbscExpiration := time.Now().Add(5 * time.Minute)
-	sess := persistedSession{
-		DBSCPublicJWKS:      []byte(`{"keys":[{"kty":"EC"}]}`),
-		DBSCCurrentCookieID: "bound-id-123",
-		DBSCExpiration:      dbscExpiration,
-	}
-
-	w := httptest.NewRecorder()
-	if err := cs.save(w, nil, expiresAt, sess); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	cookies := w.Result().Cookies()
-	if len(cookies) == 0 {
-		t.Fatal("no cookies set")
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(cookies[0])
-	bound := &http.Cookie{Name: "__Host-session-id-bound", Value: "bound-id-123"}
-	req.AddCookie(bound)
-
-	loaded, _, err := cs.load(req)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if loaded.DBSCExpiration.IsZero() {
-		t.Fatal("DBSCExpiration not persisted in cookie")
-	}
-	if !loaded.DBSCExpiration.Equal(dbscExpiration) {
-		t.Fatalf("DBSCExpiration mismatch: got %v want %v", loaded.DBSCExpiration, dbscExpiration)
-	}
-	if loaded.DBSCCurrentCookieID != "bound-id-123" {
-		t.Fatalf("DBSCCurrentCookieID: got %q want bound-id-123", loaded.DBSCCurrentCookieID)
+	if err == nil || !strings.Contains(err.Error(), "DBSC requires a KV-backed session manager") {
+		t.Fatalf("NewCookieManager error = %v, want KV-backed DBSC error", err)
 	}
 }
 
