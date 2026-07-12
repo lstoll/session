@@ -32,7 +32,7 @@ func (s *cookieStore) load(r *http.Request) (persistedSession, []byte, error) {
 	// Split and validate format: magic.encodedData
 	sp := strings.SplitN(cookieValue, ".", 2)
 	if len(sp) != 2 {
-		return persistedSession{}, nil, errors.New("cookie does not contain two dot-separated parts")
+		return persistedSession{}, nil, nil
 	}
 
 	magic := sp[0]
@@ -41,18 +41,18 @@ func (s *cookieStore) load(r *http.Request) (persistedSession, []byte, error) {
 	// Decode
 	decodedData, err := managerCookieValueEncoding.DecodeString(encodedData)
 	if err != nil {
-		return persistedSession{}, nil, fmt.Errorf("decoding cookie string: %w", err)
+		return persistedSession{}, nil, nil
 	}
 
 	// Validate magic
 	if magic != managerCompressedCookieMagic && magic != managerCookieMagic {
-		return persistedSession{}, nil, fmt.Errorf("cookie has bad magic prefix: %s", magic)
+		return persistedSession{}, nil, nil
 	}
 
 	// Decrypt using AEAD with domain separated AD
 	decryptedData, err := s.aead.Decrypt(decodedData, []byte(s.cookieSettings.Name))
 	if err != nil {
-		return persistedSession{}, nil, fmt.Errorf("decrypting cookie: %w", err)
+		return persistedSession{}, nil, nil
 	}
 
 	// Decompress if needed
@@ -75,7 +75,7 @@ func (s *cookieStore) load(r *http.Request) (persistedSession, []byte, error) {
 	}
 	expiresAt := time.Unix(int64(binary.LittleEndian.Uint64(rawData[:8])), 0)
 	if expiresAt.Before(time.Now()) {
-		return persistedSession{}, nil, fmt.Errorf("cookie expired at %s", expiresAt)
+		return persistedSession{}, nil, nil
 	}
 
 	// Decode using the codec

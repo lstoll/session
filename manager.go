@@ -125,6 +125,12 @@ func (c *SessionCookieOpts) newCookie(exp time.Time) *http.Cookie {
 type ManagerOpts struct {
 	MaxLifetime time.Duration
 	IdleTimeout time.Duration
+	// ErrorHandler handles failures that prevent the manager from safely loading
+	// or persisting session state. Eager load failures prevent the application
+	// handler from running. Lazy load failures are discovered by the first session
+	// accessor; the session and response are then aborted. When nil, the manager
+	// logs the error and responds 500.
+	ErrorHandler func(http.ResponseWriter, *http.Request, error)
 	// Onload is called when a session is retrieved from storage
 	Onload func(map[string]any) map[string]any
 	// Cookie settings
@@ -319,7 +325,8 @@ func (m *Manager) Wrap(next http.Handler) http.Handler {
 		} else {
 			decodedData, data, err := m.loadSession(r)
 			if err != nil {
-				slog.WarnContext(r.Context(), "Failed to load session, starting a new one", "err", err)
+				m.handleErr(w, r, err)
+				return
 			} else if data != nil {
 				sctx.sessdata = decodedData
 				sctx.isNew = false
@@ -814,6 +821,10 @@ func (m *Manager) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request, s
 }
 
 func (m *Manager) handleErr(w http.ResponseWriter, r *http.Request, err error) {
+	if m.opts.ErrorHandler != nil {
+		m.opts.ErrorHandler(w, r, err)
+		return
+	}
 	slog.ErrorContext(r.Context(), "error in session manager", "err", err)
 	http.Error(w, "Internal Error", http.StatusInternalServerError)
 }

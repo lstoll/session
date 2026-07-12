@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,14 @@ import (
 	"github.com/tink-crypto/tink-go/v2/mac"
 	"github.com/tink-crypto/tink-go/v2/tink"
 )
+
+type failingGetKV struct{}
+
+func (failingGetKV) Get(context.Context, string) ([]byte, bool, error) {
+	return nil, false, errors.New("store unavailable")
+}
+func (failingGetKV) Set(context.Context, string, time.Time, []byte) error { return nil }
+func (failingGetKV) Delete(context.Context, string) error                 { return nil }
 
 func newTestMAC(t *testing.T) tink.MAC {
 	t.Helper()
@@ -167,6 +176,47 @@ func TestKVManager_EagerLoad_hitsKVOnEveryRequest(t *testing.T) {
 	static.ServeHTTP(rrStatic, reqStatic)
 	if ckv.getCount() != 1 {
 		t.Fatalf("eager load should hit KV on cookie-bearing request, got %d gets", ckv.getCount())
+	}
+}
+
+func TestKVManager_LoadErrorAbortsRequest(t *testing.T) {
+	for _, eager := range []bool{false, true} {
+		t.Run(map[bool]string{false: "lazy", true: "eager"}[eager], func(t *testing.T) {
+			var handled error
+			mgr, err := NewKVManager(failingGetKV{}, &KVManagerOpts{
+				EagerLoad: eager,
+				ManagerOpts: ManagerOpts{ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+					handled = err
+					http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			called := false
+			handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				mgr.FromContext(r.Context()).Get("user")
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.AddCookie(&http.Cookie{Name: mgr.cookieSettings.Name, Value: "AAAAAAAAAAAAAAAAAAAAAAAAAA"})
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+
+			if eager && called {
+				t.Fatal("eager load error must prevent handler execution")
+			}
+			if !eager && !called {
+				t.Fatal("lazy handler must run until session access triggers loading")
+			}
+			if handled == nil || !strings.Contains(handled.Error(), "store unavailable") {
+				t.Fatalf("ErrorHandler received %v", handled)
+			}
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", rr.Code)
+			}
+		})
 	}
 }
 
