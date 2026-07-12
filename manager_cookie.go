@@ -186,3 +186,7 @@ func (s *cookieStore) generateChallenge(r *http.Request, sctx *Session, isRegist
 func (s *cookieStore) verifyChallenge(r *http.Request, sctx *Session, challengeStr string, isRegister bool) error {
 	return errors.New("DBSC requires a KV-backed session manager")
 }
+
+func (s *cookieStore) consumeChallenge(r *http.Request, sctx *Session, challengeStr string) error {
+	return errors.New("DBSC requires a KV-backed session manager")
+}

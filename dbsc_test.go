@@ -96,6 +96,41 @@ func TestDBSC(t *testing.T) {
 	})
 }
 
+func TestDBSCConcurrentRefreshChallenges(t *testing.T) {
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	store := &kvStore{kv: kv}
+	sctx := &Session{sessdata: persistedSession{DBSCSessionID: "dbsc-session"}}
+	req := httptest.NewRequest(http.MethodPost, "/dbsc/refresh", nil)
+
+	first, err := store.generateChallenge(req, sctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.generateChallenge(req, sctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("independently generated challenges must differ")
+	}
+	if err := store.verifyChallenge(req, sctx, first, false); err != nil {
+		t.Fatalf("first challenge was overwritten: %v", err)
+	}
+	if err := store.verifyChallenge(req, sctx, second, false); err != nil {
+		t.Fatalf("second challenge is not valid: %v", err)
+	}
+
+	if err := store.consumeChallenge(req, sctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.verifyChallenge(req, sctx, first, false); err == nil {
+		t.Fatal("consumed challenge remains valid")
+	}
+	if err := store.verifyChallenge(req, sctx, second, false); err != nil {
+		t.Fatalf("consuming first challenge invalidated second: %v", err)
+	}
+}
+
 func testDBSCRegistrationCrossSiteRejected(t *testing.T, useCookie bool) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}

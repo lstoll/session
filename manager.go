@@ -84,6 +84,7 @@ type sessionStore interface {
 
 	generateChallenge(r *http.Request, sctx *Session, isRegister bool) (string, error)
 	verifyChallenge(r *http.Request, sctx *Session, challengeStr string, isRegister bool) error
+	consumeChallenge(r *http.Request, sctx *Session, challengeStr string) error
 }
 
 // Manager handles both session data and storage.
@@ -796,9 +797,12 @@ func (m *Manager) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request, s
 		http.Error(w, "invalid refresh proof", http.StatusUnauthorized)
 		return true
 	}
+	if err := m.store.consumeChallenge(r, sctx, jti); err != nil {
+		m.handleErr(w, r, err)
+		return true
+	}
 
 	sctx.sessdata.DBSCExpiration = time.Now().Add(m.opts.DBSCRefreshInterval)
-	sctx.sessdata.DBSCChallenge = ""
 
 	// Generate new bound cookie value to rotate it
 	sctx.sessdata.DBSCCurrentCookieID = rand.Text()

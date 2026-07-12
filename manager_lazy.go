@@ -118,9 +118,12 @@ func (m *Manager) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx *Se
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return true
 	}
+	if err := m.store.consumeChallenge(r, sctx, jti); err != nil {
+		m.handleErr(w, r, err)
+		return true
+	}
 
 	sctx.sessdata.DBSCExpiration = time.Now().Add(m.opts.DBSCRefreshInterval)
-	sctx.sessdata.DBSCChallenge = ""
 	sctx.sessdata.DBSCCurrentCookieID = rand.Text()
 	sctx.save = true
 	sctx.Reset()

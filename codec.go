@@ -56,9 +56,10 @@ type persistedSession struct {
 	DBSCRegistrationChallenge string
 	// DBSCExpiration tracks when the current "short-lived" proof expires.
 	DBSCExpiration time.Time
-	// DBSCChallenge is the active nonce sent to the client during a refresh challenge.
+	// DBSCChallenge is a legacy single refresh nonce retained for compatibility
+	// with sessions created before challenges moved to independent KV records.
 	DBSCChallenge string
-	// DBSCChallengeIssuedAt tracks when the active nonce was generated to prevent stale challenge replays.
+	// DBSCChallengeIssuedAt is the issue time for the legacy refresh nonce.
 	DBSCChallengeIssuedAt time.Time
 	// DBSCCurrentCookieID tracks the value of the short-lived device-bound cookie.
 	DBSCCurrentCookieID string

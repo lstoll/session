@@ -223,34 +223,72 @@ func (s *kvStore) touch(w http.ResponseWriter, r *http.Request, expiresAt time.T
 
 func (s *kvStore) generateChallenge(r *http.Request, sctx *Session, isRegister bool) (string, error) {
 	challenge := rand.Text()
-	sctx.sessdataMu.Lock()
 	if isRegister {
+		sctx.sessdataMu.Lock()
 		sctx.sessdata.DBSCRegistrationChallenge = challenge
-	} else {
-		sctx.sessdata.DBSCChallenge = challenge
-		sctx.sessdata.DBSCChallengeIssuedAt = time.Now()
+		sctx.save = true
+		sctx.sessdataMu.Unlock()
+		return challenge, nil
 	}
-	sctx.save = true
-	sctx.sessdataMu.Unlock()
+
+	sctx.sessdataMu.RLock()
+	sessionID := sctx.sessdata.DBSCSessionID
+	sctx.sessdataMu.RUnlock()
+	if sessionID == "" {
+		return "", errors.New("cannot issue refresh challenge without DBSC session ID")
+	}
+	if err := s.kv.Set(r.Context(), dbscChallengeKey(sessionID, challenge), time.Now().Add(dbscProofMaxAge), []byte{1}); err != nil {
+		return "", fmt.Errorf("storing DBSC challenge: %w", err)
+	}
 	return challenge, nil
 }
 
 func (s *kvStore) verifyChallenge(r *http.Request, sctx *Session, challengeStr string, isRegister bool) error {
 	sctx.sessdataMu.RLock()
-	defer sctx.sessdataMu.RUnlock()
 	if isRegister {
+		defer sctx.sessdataMu.RUnlock()
 		if sctx.sessdata.DBSCRegistrationChallenge == "" || sctx.sessdata.DBSCRegistrationChallenge != challengeStr {
 			return errors.New("registration challenge mismatch or missing")
 		}
-	} else {
-		if sctx.sessdata.DBSCChallenge == "" || sctx.sessdata.DBSCChallenge != challengeStr {
-			return errors.New("refresh challenge mismatch or missing")
-		}
-		if sctx.sessdata.DBSCChallengeIssuedAt.IsZero() || time.Since(sctx.sessdata.DBSCChallengeIssuedAt) > 5*time.Minute {
-			return errors.New("refresh challenge expired")
-		}
+		return nil
+	}
+	sessionID := sctx.sessdata.DBSCSessionID
+	legacyChallenge := sctx.sessdata.DBSCChallenge
+	legacyIssuedAt := sctx.sessdata.DBSCChallengeIssuedAt
+	sctx.sessdataMu.RUnlock()
+
+	data, found, err := s.kv.Get(r.Context(), dbscChallengeKey(sessionID, challengeStr))
+	if err != nil {
+		return fmt.Errorf("loading DBSC challenge: %w", err)
+	}
+	if found && len(data) == 1 && data[0] == 1 {
+		return nil
+	}
+	// Accept one challenge persisted by versions before independent challenge
+	// records were introduced, so in-flight upgrades do not break refreshes.
+	if legacyChallenge == challengeStr && !legacyIssuedAt.IsZero() && time.Since(legacyIssuedAt) <= dbscProofMaxAge {
+		return nil
+	}
+	return errors.New("refresh challenge mismatch, missing, or expired")
+}
+
+func (s *kvStore) consumeChallenge(r *http.Request, sctx *Session, challengeStr string) error {
+	sctx.sessdataMu.Lock()
+	sessionID := sctx.sessdata.DBSCSessionID
+	if sctx.sessdata.DBSCChallenge == challengeStr {
+		sctx.sessdata.DBSCChallenge = ""
+		sctx.sessdata.DBSCChallengeIssuedAt = time.Time{}
+		sctx.save = true
+	}
+	sctx.sessdataMu.Unlock()
+	if err := s.kv.Delete(r.Context(), dbscChallengeKey(sessionID, challengeStr)); err != nil {
+		return fmt.Errorf("consuming DBSC challenge: %w", err)
 	}
 	return nil
+}
+
+func dbscChallengeKey(sessionID, challenge string) string {
+	return managerHashSessionID("dbsc-challenge:" + sessionID + ":" + challenge)
 }
 
 // Generate a consistent hash of session ID for KV storage
