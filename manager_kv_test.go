@@ -279,14 +279,14 @@ func TestKVManager_SessionIDMAC_skipsKVGetOnInvalidCookie(t *testing.T) {
 	}
 }
 
-func TestKVManager_withoutSessionIDMAC_acceptsBareCookie(t *testing.T) {
+func TestKVManager_withoutSessionIDMAC_replacesUnknownBareCookie(t *testing.T) {
 	kv := &memoryKV{contents: make(map[string]kvItem)}
 	mgr, err := NewKVManager(kv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	bareID := "BARESESSIONIDBARESESSIONIDBARESESS"
+	bareID := "AAAAAAAAAAAAAAAAAAAAAAAAAA"
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mgr.FromContext(r.Context()).Set("k", "v")
 		w.WriteHeader(http.StatusOK)
@@ -297,8 +297,34 @@ func TestKVManager_withoutSessionIDMAC_acceptsBareCookie(t *testing.T) {
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
-	if _, ok := kv.contents[managerHashSessionID(bareID)]; !ok {
-		t.Fatal("without MAC, bare cookie value is used as session id")
+	if _, ok := kv.contents[managerHashSessionID(bareID)]; ok {
+		t.Fatal("unknown client-provided ID must not be adopted")
+	}
+	if len(kv.contents) != 1 {
+		t.Fatalf("expected one server-issued session, got %d", len(kv.contents))
+	}
+	issued := rr.Result().Cookies()
+	if len(issued) != 1 || issued[0].Value == bareID {
+		t.Fatalf("server did not replace unknown ID: %#v", issued)
+	}
+}
+
+func TestKVManager_withoutSessionIDMAC_skipsOversizedIDLookup(t *testing.T) {
+	ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
+	mgr, err := NewKVManager(ckv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mgr.FromContext(r.Context()).Set("k", "v")
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: mgr.cookieSettings.Name, Value: strings.Repeat("x", 129)})
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if ckv.getCount() != 0 {
+		t.Fatalf("oversized ID should not hit KV, got %d gets", ckv.getCount())
 	}
 }
 

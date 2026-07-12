@@ -47,7 +47,7 @@ func (s *kvStore) signSessionID(id string) (string, error) {
 
 func (s *kvStore) parseSessionIDCookie(raw string) (id string, ok bool) {
 	if s.mac == nil {
-		if raw == "" {
+		if !plausibleSessionID(raw) {
 			return "", false
 		}
 		return raw, true
@@ -64,6 +64,12 @@ func (s *kvStore) parseSessionIDCookie(raw string) (id string, ok bool) {
 		return "", false
 	}
 	return sp[1], true
+}
+
+// plausibleSessionID bounds attacker-controlled KV lookup input. It does not
+// authenticate the ID; only a successful store lookup makes an ID reusable.
+func plausibleSessionID(id string) bool {
+	return id != "" && len(id) <= 128
 }
 
 func (s *kvStore) peekSessionID(r *http.Request) bool {
@@ -92,7 +98,9 @@ func (s *kvStore) load(r *http.Request) (persistedSession, []byte, error) {
 	if !ok {
 		return persistedSession{}, nil, nil
 	}
-	setManagerSessionIDInContext(r, s.m, sessionID)
+	// A client-provided ID is only reusable after the store confirms that it was
+	// issued by this server. Until then, a subsequent save must generate a new ID.
+	setManagerSessionIDInContext(r, s.m, "")
 
 	// Hash the session ID for storage
 	storeKey := managerHashSessionID(sessionID)
@@ -112,6 +120,7 @@ func (s *kvStore) load(r *http.Request) (persistedSession, []byte, error) {
 	if err != nil {
 		return persistedSession{}, nil, fmt.Errorf("decoding session: %w", err)
 	}
+	setManagerSessionIDInContext(r, s.m, sessionID)
 
 	return sess, data, nil
 }
