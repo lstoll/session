@@ -32,9 +32,12 @@ func TestKV_MySQL(t *testing.T) {
 	}
 
 	// Create KV store with MySQL dialect
-	kv := sqlkv.New(db, &sqlkv.Opts{
+	kv, err := sqlkv.New(db, &sqlkv.Opts{
 		Dialect: sqlkv.MySQL,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Create the table
 	if err := kv.CreateTable(context.Background()); err != nil {

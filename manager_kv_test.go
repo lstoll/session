@@ -43,6 +43,23 @@ type countingKV struct {
 	sets int
 }
 
+func TestMemoryKVConcurrentExpiredReads(t *testing.T) {
+	kv := NewMemoryKV()
+	if err := kv.Set(context.Background(), "expired", time.Now().Add(-time.Second), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Go(func() {
+			if _, found, err := kv.Get(context.Background(), "expired"); err != nil || found {
+				t.Errorf("Get = found %v, err %v", found, err)
+			}
+		})
+	}
+	wg.Wait()
+}
+
 func (c *countingKV) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	c.mu.Lock()
 	c.gets++

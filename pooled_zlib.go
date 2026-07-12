@@ -8,6 +8,8 @@ import (
 	"sync"
 )
 
+const maxDecompressedSessionSize = 1 << 20 // 1 MiB
+
 var compressorPool = sync.Pool{
 	New: func() any {
 		return &pooledCompressor{}
@@ -73,10 +75,13 @@ func (p *pooledDecompressor) Decompress(data []byte) ([]byte, error) {
 			return nil, fmt.Errorf("resetting reader: %w", err)
 		}
 	}
-	b, err := io.ReadAll(p.Reader)
+	b, err := io.ReadAll(io.LimitReader(p.Reader, maxDecompressedSessionSize+1))
+	_ = p.Reader.Close()
 	if err != nil {
 		return nil, fmt.Errorf("decompressing: %w", err)
 	}
-	_ = p.Reader.Close()
+	if len(b) > maxDecompressedSessionSize {
+		return nil, fmt.Errorf("decompressed session exceeds %d bytes", maxDecompressedSessionSize)
+	}
 	return b, nil
 }

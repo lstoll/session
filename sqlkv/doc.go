@@ -21,10 +21,13 @@
 //	}
 //
 //	// Create a new KV store
-//	kv := sqlkv.New(db, &sqlkv.Opts{
+//	kv, err := sqlkv.New(db, &sqlkv.Opts{
 //		Dialect: sqlkv.SQLite,
 //		TableName: "my_sessions", // optional, defaults to "web_sessions"
 //	})
+//	if err != nil {
+//		log.Fatal(err)
+//	}
 //
 //	// Create the table if it doesn't exist
 //	if err := kv.CreateTable(context.Background()); err != nil {

@@ -23,12 +23,13 @@ type dbscServeConfig struct {
 	GenerateChallenge func(r *http.Request, sctx *Session, isRegister bool) (string, error)
 }
 
-// Session represents a tracked web session.
+// Session represents a tracked web session. A Session is scoped to one HTTP
+// request and must not be accessed concurrently by multiple goroutines.
 type Session struct {
-	mgr      *Manager
-	reqW     http.ResponseWriter
-	reqR     *http.Request
-	sessdata persistedSession
+	mgr        *Manager
+	reqW       http.ResponseWriter
+	reqR       *http.Request
+	sessdata   persistedSession
 	sessdataMu sync.RWMutex
 	// datab is the original loaded data bytes. Used for idle timeout, when a
 	// save may happen without data modification

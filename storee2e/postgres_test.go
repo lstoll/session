@@ -30,9 +30,12 @@ func TestKV_PostgreSQL(t *testing.T) {
 	db := stdlib.OpenDBFromPool(pool)
 
 	// Create KV store with PostgreSQL dialect
-	kv := sqlkv.New(db, &sqlkv.Opts{
+	kv, err := sqlkv.New(db, &sqlkv.Opts{
 		Dialect: sqlkv.PostgreSQL,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Create the table
 	if err := kv.CreateTable(context.Background()); err != nil {

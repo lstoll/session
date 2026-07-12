@@ -1,7 +1,10 @@
 package session
 
 import (
+	"bufio"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"sync"
 )
@@ -52,4 +55,56 @@ func (h *hookRW) WriteHeader(statusCode int) {
 
 func (h *hookRW) Unwrap() http.ResponseWriter {
 	return h.ResponseWriter
+}
+
+// FlushError commits session state before flushing buffered response data.
+func (h *hookRW) FlushError() error {
+	if h.sctx != nil && h.sctx.aborted {
+		return http.ErrAbortHandler
+	}
+	write := true
+	h.hookOnce.Do(func() { write = h.hook(h.ResponseWriter) })
+	if !write {
+		return errors.New("request interrupted by hook")
+	}
+	return http.NewResponseController(h.ResponseWriter).Flush()
+}
+
+func (h *hookRW) Flush() {
+	_ = h.FlushError()
+}
+
+func (h *hookRW) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h.sctx != nil && h.sctx.aborted {
+		return nil, nil, http.ErrAbortHandler
+	}
+	write := true
+	h.hookOnce.Do(func() { write = h.hook(h.ResponseWriter) })
+	if !write {
+		return nil, nil, errors.New("request interrupted by hook")
+	}
+	return http.NewResponseController(h.ResponseWriter).Hijack()
+}
+
+func (h *hookRW) Push(target string, opts *http.PushOptions) error {
+	p, ok := h.ResponseWriter.(http.Pusher)
+	if !ok {
+		return http.ErrNotSupported
+	}
+	return p.Push(target, opts)
+}
+
+func (h *hookRW) ReadFrom(r io.Reader) (int64, error) {
+	if h.sctx != nil && h.sctx.aborted {
+		return 0, http.ErrAbortHandler
+	}
+	write := true
+	h.hookOnce.Do(func() { write = h.hook(h.ResponseWriter) })
+	if !write {
+		return 0, errors.New("request interrupted by hook")
+	}
+	if rf, ok := h.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(r)
+	}
+	return io.Copy(h.ResponseWriter, r)
 }

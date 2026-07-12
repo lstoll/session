@@ -1,0 +1,38 @@
+package session
+
+import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestHookRWForwardsOptionalInterfaces(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	hookCalls := 0
+	h := &hookRW{
+		ResponseWriter: recorder,
+		hook: func(http.ResponseWriter) bool {
+			hookCalls++
+			return true
+		},
+	}
+
+	if _, err := h.ReadFrom(strings.NewReader("body")); err != nil {
+		t.Fatal(err)
+	}
+	h.Flush()
+	if hookCalls != 1 {
+		t.Fatalf("hook called %d times, want 1", hookCalls)
+	}
+	if recorder.Body.String() != "body" || !recorder.Flushed {
+		t.Fatalf("forwarded response = %q, flushed = %v", recorder.Body.String(), recorder.Flushed)
+	}
+	if _, _, err := h.Hijack(); !errors.Is(err, http.ErrNotSupported) {
+		t.Fatalf("Hijack error = %v, want ErrNotSupported", err)
+	}
+	if err := h.Push("/asset", nil); !errors.Is(err, http.ErrNotSupported) {
+		t.Fatalf("Push error = %v, want ErrNotSupported", err)
+	}
+}

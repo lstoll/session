@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"time"
 )
+
+var tableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 const (
 	// DefaultTableName is the default table name for the KV store
@@ -66,7 +69,10 @@ type Opts struct {
 }
 
 // New creates a new KV store backed by database/sql
-func New(db *sql.DB, opts *Opts) *SqlKV {
+func New(db *sql.DB, opts *Opts) (*SqlKV, error) {
+	if db == nil {
+		return nil, errors.New("database is required")
+	}
 	tableName := DefaultTableName
 	dialect := Generic
 
@@ -75,6 +81,9 @@ func New(db *sql.DB, opts *Opts) *SqlKV {
 			tableName = opts.TableName
 		}
 		dialect = opts.Dialect
+	}
+	if !tableNamePattern.MatchString(tableName) {
+		return nil, fmt.Errorf("invalid table name %q", tableName)
 	}
 
 	kv := &SqlKV{
@@ -86,7 +95,7 @@ func New(db *sql.DB, opts *Opts) *SqlKV {
 	// Prepare queries based on dialect
 	kv.setupQueries()
 
-	return kv
+	return kv, nil
 }
 
 // setupQueries prepares the SQL queries based on the dialect

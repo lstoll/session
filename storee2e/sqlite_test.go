@@ -29,9 +29,12 @@ func TestKV_SQLite(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	// Create KV store with SQLite dialect
-	kv := sqlkv.New(db, &sqlkv.Opts{
+	kv, err := sqlkv.New(db, &sqlkv.Opts{
 		Dialect: sqlkv.SQLite,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Create the table
 	if err := kv.CreateTable(context.Background()); err != nil {
@@ -56,9 +59,12 @@ func TestKV_SQLite_GC(t *testing.T) {
 	defer cleanup()
 
 	// Create KV store
-	kv := sqlkv.New(db, &sqlkv.Opts{
+	kv, err := sqlkv.New(db, &sqlkv.Opts{
 		Dialect: sqlkv.SQLite,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Create the table
 	if err := kv.CreateTable(context.Background()); err != nil {
@@ -68,7 +74,7 @@ func TestKV_SQLite_GC(t *testing.T) {
 	ctx := context.Background()
 
 	// Insert some test data directly
-	_, err := db.Exec("INSERT INTO "+sqlkv.DefaultTableName+" (id, data, expires_at) VALUES (?, ?, ?)",
+	_, err = db.Exec("INSERT INTO "+sqlkv.DefaultTableName+" (id, data, expires_at) VALUES (?, ?, ?)",
 		"expired1", []byte(`{"test":"data1"}`), time.Now().Add(-1*time.Hour))
 	if err != nil {
 		t.Fatalf("Failed to insert test data: %v", err)

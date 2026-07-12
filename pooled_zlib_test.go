@@ -60,6 +60,23 @@ func TestCompression(t *testing.T) {
 	}
 }
 
+func TestDecompressRejectsOversizedSession(t *testing.T) {
+	data := bytes.Repeat([]byte("a"), maxDecompressedSessionSize+1)
+	cw := getCompressor()
+	compressed, err := cw.Compress(data)
+	putCompressor(cw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cr := getDecompressor()
+	_, err = cr.Decompress(compressed)
+	putDecompressor(cr)
+	if err == nil {
+		t.Fatal("oversized decompressed session was accepted")
+	}
+}
+
 func BenchmarkCompression(b *testing.B) {
 	b.Run("unpooled", func(b *testing.B) {
 		for range b.N {

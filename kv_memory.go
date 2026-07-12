@@ -21,8 +21,8 @@ func NewMemoryKV() KV {
 }
 
 func (m *memoryKV) Get(_ context.Context, key string) (_ []byte, found bool, _ error) {
-	m.contentsMu.RLock()
-	defer m.contentsMu.RUnlock()
+	m.contentsMu.Lock()
+	defer m.contentsMu.Unlock()
 
 	v, ok := m.contents[key]
 	if !ok {
