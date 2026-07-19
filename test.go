@@ -6,23 +6,23 @@ import (
 )
 
 type TestResult[T any] struct {
-	ctx *Session[T]
+	session *Session[T]
 }
 
 func (t *TestResult[T]) Saved() bool {
-	return t.ctx.save
+	return t.session.state == sessionDirty
 }
 
 func (t *TestResult[T]) Deleted() bool {
-	return t.ctx.delete
+	return t.session.state == sessionDeleted
 }
 
 func (t *TestResult[T]) Reset() bool {
-	return t.ctx.reset
+	return t.session.rotate
 }
 
 func (t *TestResult[T]) Result() T {
-	return t.ctx.sessdata.Data
+	return t.session.sessdata.Data
 }
 
 // TestContext attaches a session containing data to a context for testing.
@@ -36,5 +36,5 @@ func (m *Manager[T]) TestContext(ctx context.Context, data T) (context.Context, 
 			CreatedAt: time.Now(),
 		},
 	}
-	return context.WithValue(ctx, sessionContextKey[T]{manager: m}, s), &TestResult[T]{ctx: s}
+	return context.WithValue(ctx, sessionContextKey[T]{manager: m}, s), &TestResult[T]{session: s}
 }

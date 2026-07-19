@@ -29,9 +29,11 @@ func (m *Manager[T]) FromContext(ctx context.Context) *Session[T] {
 type sessionStore[T any] interface {
 	load(r *http.Request) (persistedSession[T], []byte, error)
 	save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, sess persistedSession[T]) error
-	delete(w http.ResponseWriter, r *http.Request) error
+	delete(r *http.Request) error
 	touch(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error
+}
 
+type dbscChallengeStore[T any] interface {
 	generateChallenge(r *http.Request, sctx *Session[T], isRegister bool) (string, error)
 	verifyChallenge(r *http.Request, sctx *Session[T], challengeStr string, isRegister bool) error
 	consumeChallenge(r *http.Request, sctx *Session[T], challengeStr string) error
@@ -39,12 +41,12 @@ type sessionStore[T any] interface {
 
 // Manager handles both session data and storage.
 type Manager[T any] struct {
-	store               sessionStore[T]
-	cookieSettings      SessionCookieOpts
-	codec               codec[T]
-	opts                managerOpts[T]
-	compressionDisabled bool
-	lazyLoad            bool
+	store          sessionStore[T]
+	dbscStore      dbscChallengeStore[T]
+	cookieSettings SessionCookieOpts
+	codec          codec[T]
+	opts           managerOpts[T]
+	lazyLoad       bool
 }
 
 var DefaultIdleTimeout = 24 * time.Hour
@@ -145,9 +147,8 @@ type KVManagerOpts[T any] struct {
 func NewCookieManager[T any](aead tink.AEAD, opts *CookieManagerOpts[T]) (*Manager[T], error) {
 	normalized, compressionDisabled := normalizeCookieManagerOpts(opts)
 	m := &Manager[T]{
-		opts:                normalized,
-		codec:               &gobCodec[T]{},
-		compressionDisabled: compressionDisabled,
+		opts:  normalized,
+		codec: &gobCodec[T]{},
 	}
 
 	if m.opts.IdleTimeout == 0 && m.opts.MaxLifetime == 0 {
@@ -166,7 +167,7 @@ func NewCookieManager[T any](aead tink.AEAD, opts *CookieManagerOpts[T]) (*Manag
 	m.store = &cookieStore[T]{
 		aead:                aead,
 		codec:               m.codec,
-		compressionDisabled: m.compressionDisabled,
+		compressionDisabled: compressionDisabled,
 		cookieSettings:      m.cookieSettings,
 	}
 
@@ -198,13 +199,15 @@ func NewKVManager[T any](kv KV, opts *KVManagerOpts[T]) (*Manager[T], error) {
 		}
 	}
 
-	m.store = &kvStore[T]{
+	store := &kvStore[T]{
 		m:              m,
 		kv:             kv,
 		codec:          m.codec,
 		cookieSettings: m.cookieSettings,
 		mac:            sessionIDMAC,
 	}
+	m.store = store
+	m.dbscStore = store
 
 	m.lazyLoad = !eagerLoad
 
@@ -294,25 +297,16 @@ func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 			if err != nil {
 				m.handleErr(w, r, err)
 				return
-			} else if data != nil {
-				sctx.sessdata = decodedData
-				sctx.isNew = false
-				if m.opts.IdleTimeout != 0 {
-					sctx.datab = data
-				}
-				if m.opts.Onload != nil {
-					sctx.sessdata.Data = m.opts.Onload(sctx.sessdata.Data)
-				}
 			}
-			sctx.loaded = true
+			m.installLoadedSession(sctx, decodedData, data)
 		}
 
 		dbscEnabled := m.opts.DBSCRefreshInterval > 0
 
-		hw := &hookRW[T]{
+		hw := &hookRW{
 			ResponseWriter: w,
 			hook:           m.saveHook(r, sctx),
-			sctx:           sctx,
+			aborted:        func() bool { return sctx.aborted },
 		}
 		sctx.reqW = hw
 		sctx.reqR = r
@@ -345,7 +339,7 @@ func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 		if dbscEnabled {
 			ctx = context.WithValue(ctx, dbscServeConfigKey{}, dbscServeConfig[T]{
 				RegistrationPath:  m.dbscRegistrationPath(),
-				GenerateChallenge: m.store.generateChallenge,
+				GenerateChallenge: m.dbscStore.generateChallenge,
 			})
 		}
 		r = r.WithContext(ctx)
@@ -354,9 +348,7 @@ func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 
 		// if the handler doesn't write anything, make sure we fire the hook
 		// anyway.
-		hw.hookOnce.Do(func() {
-			hw.hook(hw.ResponseWriter)
-		})
+		_ = hw.beforeWrite()
 	})
 }
 
@@ -367,31 +359,49 @@ func (m *Manager[T]) loadSession(r *http.Request) (persistedSession[T], []byte, 
 	return m.store.load(r)
 }
 
+func (m *Manager[T]) installLoadedSession(sctx *Session[T], decoded persistedSession[T], data []byte) {
+	if data != nil {
+		sctx.sessdata = decoded
+		sctx.isNew = false
+		if m.opts.IdleTimeout != 0 {
+			sctx.loadedData = data
+		}
+		if m.opts.Onload != nil {
+			sctx.sessdata.Data = m.opts.Onload(sctx.sessdata.Data)
+		}
+	}
+	sctx.loaded = true
+}
+
 func (m *Manager[T]) saveHook(r *http.Request, sctx *Session[T]) func(w http.ResponseWriter) bool {
 	return func(w http.ResponseWriter) bool {
-		// Update the metadata timestamp
-		sctx.sessdata.UpdatedAt = time.Now()
+		if sctx.state == sessionDeleted {
+			if err := m.deleteSession(w, r, sctx); err != nil {
+				m.handleErr(w, r, err)
+				return false
+			}
+			return true
+		}
 
-		// If we need to delete the session
-		if sctx.delete || sctx.reset {
+		if sctx.rotate {
 			if err := m.deleteSession(w, r, sctx); err != nil {
 				m.handleErr(w, r, err)
 				return false
 			}
 		}
 
-		// If we need to save the session
-		if sctx.save || sctx.reset {
+		if sctx.state == sessionDirty {
+			sctx.sessdata.UpdatedAt = time.Now()
 			// DBSC registration is a response header; this hook runs before the first
 			// Write/WriteHeader reaches the client, so we can still add it here.
-			if sctx.save && !sctx.delete && !sctx.reset {
+			if !sctx.rotate {
 				m.maybeAttachDBSCRegistrationOffer(w, r, sctx)
 			}
 			if err := m.saveSession(w, r, sctx); err != nil {
 				m.handleErr(w, r, err)
 				return false
 			}
-		} else if m.opts.IdleTimeout != 0 && sctx.loaded && len(sctx.datab) != 0 {
+		} else if m.opts.IdleTimeout != 0 && sctx.loaded && len(sctx.loadedData) != 0 {
 			// Just touch the session to update its lifetime
 			if err := m.touchSession(w, r, sctx); err != nil {
 				m.handleErr(w, r, err)
@@ -430,13 +440,13 @@ func (m *Manager[T]) deleteSession(w http.ResponseWriter, r *http.Request, sctx 
 	// Also delete the DBSC bound cookie
 	m.deleteDBSCBoundCookie(w)
 
-	return m.store.delete(w, r)
+	return m.store.delete(r)
 }
 
 // touchSession updates the session expiry without modifying content
 func (m *Manager[T]) touchSession(w http.ResponseWriter, r *http.Request, sctx *Session[T]) error {
 	expiresAt := m.calculateExpiry(sctx.sessdata)
-	return m.store.touch(w, r, expiresAt, sctx.datab)
+	return m.store.touch(w, r, expiresAt, sctx.loadedData)
 }
 
 func (m *Manager[T]) calculateExpiry(sessdata persistedSession[T]) time.Time {
@@ -527,7 +537,7 @@ func (m *Manager[T]) maybeAttachDBSCRegistrationOffer(w http.ResponseWriter, r *
 		return
 	}
 
-	challenge, err := m.store.generateChallenge(r, sctx, true)
+	challenge, err := m.dbscStore.generateChallenge(r, sctx, true)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "failed to generate registration challenge", "error", err)
 		return
@@ -674,7 +684,7 @@ func (m *Manager[T]) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Re
 		return true
 	}
 
-	if err := m.store.verifyChallenge(r, sctx, jti, true); err != nil {
+	if err := m.dbscStore.verifyChallenge(r, sctx, jti, true); err != nil {
 		slog.WarnContext(r.Context(), "DBSC registration challenge verification failed", "err", err)
 		http.Error(w, "invalid registration proof", http.StatusUnauthorized)
 		return true
@@ -693,11 +703,7 @@ func (m *Manager[T]) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Re
 	sctx.sessdata.DBSCPublicJWKS = jwks
 	sctx.sessdata.DBSCSessionID = sessionID
 	sctx.sessdata.DBSCExpiration = time.Now().Add(m.opts.DBSCRefreshInterval)
-	sctx.save = true
-	if err := m.saveSession(w, r, sctx); err != nil {
-		m.handleErr(w, r, err)
-		return true
-	}
+	sctx.state = sessionDirty
 
 	body, err := m.dbscRegistrationInstructions(sessionID)
 	if err != nil {
@@ -748,7 +754,7 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 		return m.dbscIssueRefreshChallenge(w, r, sctx)
 	}
 
-	if err := m.store.verifyChallenge(r, sctx, jti, false); err != nil {
+	if err := m.dbscStore.verifyChallenge(r, sctx, jti, false); err != nil {
 		slog.WarnContext(r.Context(), "DBSC refresh challenge verification failed", "err", err)
 		return m.dbscIssueRefreshChallenge(w, r, sctx)
 	}
@@ -758,7 +764,7 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid refresh proof", http.StatusUnauthorized)
 		return true
 	}
-	if err := m.store.consumeChallenge(r, sctx, jti); err != nil {
+	if err := m.dbscStore.consumeChallenge(r, sctx, jti); err != nil {
 		m.handleErr(w, r, err)
 		return true
 	}
@@ -768,11 +774,7 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 	// Generate new bound cookie value to rotate it
 	sctx.sessdata.DBSCCurrentCookieID = rand.Text()
 
-	sctx.save = true
-	if err := m.saveSession(w, r, sctx); err != nil {
-		m.handleErr(w, r, err)
-		return true
-	}
+	sctx.state = sessionDirty
 
 	body, err := m.dbscRegistrationInstructions(sctx.sessdata.DBSCSessionID)
 	if err != nil {
@@ -795,33 +797,20 @@ func (m *Manager[T]) handleErr(w http.ResponseWriter, r *http.Request, err error
 }
 
 func (m *Manager[T]) dbscIssueInBandChallenge(w http.ResponseWriter, r *http.Request, sctx *Session[T]) {
-	nonce, err := m.store.generateChallenge(r, sctx, false)
+	nonce, err := m.dbscStore.generateChallenge(r, sctx, false)
 	if err != nil {
 		m.handleErr(w, r, err)
 		return
 	}
-	if sctx.save {
-		if err := m.saveSession(w, r, sctx); err != nil {
-			m.handleErr(w, r, err)
-			return
-		}
-	}
-
 	w.Header().Set("Secure-Session-Challenge", `"`+nonce+`";id="`+sctx.sessdata.DBSCSessionID+`"`)
 	w.WriteHeader(http.StatusForbidden)
 }
 
 func (m *Manager[T]) dbscIssueRefreshChallenge(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
-	nonce, err := m.store.generateChallenge(r, sctx, false)
+	nonce, err := m.dbscStore.generateChallenge(r, sctx, false)
 	if err != nil {
 		m.handleErr(w, r, err)
 		return true
-	}
-	if sctx.save {
-		if err := m.saveSession(w, r, sctx); err != nil {
-			m.handleErr(w, r, err)
-			return true
-		}
 	}
 	w.Header().Set("Secure-Session-Challenge", `"`+nonce+`";id="`+sctx.sessdata.DBSCSessionID+`"`)
 	w.WriteHeader(http.StatusForbidden)

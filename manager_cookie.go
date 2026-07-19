@@ -94,7 +94,10 @@ func (s *cookieStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt 
 		return fmt.Errorf("encoding session: %w", err)
 	}
 
-	// Add expiry time to data
+	return s.writeCookie(w, expiresAt, data)
+}
+
+func (s *cookieStore[T]) writeCookie(w http.ResponseWriter, expiresAt time.Time, data []byte) error {
 	b := make([]byte, 8)
 	binary.LittleEndian.PutUint64(b, uint64(expiresAt.Unix()))
 	dataWithExpiry := append(b, data...)
@@ -134,59 +137,10 @@ func (s *cookieStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt 
 	return nil
 }
 
-func (s *cookieStore[T]) delete(w http.ResponseWriter, r *http.Request) error {
+func (s *cookieStore[T]) delete(r *http.Request) error {
 	return nil
 }
 
 func (s *cookieStore[T]) touch(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
-	// Encrypt data with AEAD
-	b := make([]byte, 8)
-	binary.LittleEndian.PutUint64(b, uint64(expiresAt.Unix()))
-	dataWithExpiry := append(b, data...)
-
-	// Apply compression if needed
-	magic := managerCookieMagic
-	if !s.compressionDisabled && len(dataWithExpiry) > managerCompressThreshold {
-		cw := getCompressor()
-		defer putCompressor(cw)
-
-		b, err := cw.Compress(dataWithExpiry)
-		if err != nil {
-			return fmt.Errorf("compressing cookie: %w", err)
-		}
-		dataWithExpiry = b
-		magic = managerCompressedCookieMagic
-	}
-
-	// Encrypt data with AEAD
-	encryptedData, err := s.aead.Encrypt(dataWithExpiry, []byte(s.cookieSettings.Name))
-	if err != nil {
-		return fmt.Errorf("encrypting cookie failed: %w", err)
-	}
-
-	// Format cookie value: magic.encodedData
-	cookieValue := magic + "." + managerCookieValueEncoding.EncodeToString(encryptedData)
-	if len(cookieValue) > managerMaxCookieSize {
-		return fmt.Errorf("cookie size %d is greater than max %d", len(cookieValue), managerMaxCookieSize)
-	}
-
-	// Set cookie
-	cookie := s.cookieSettings.newCookie(expiresAt)
-	cookie.Value = cookieValue
-
-	http.SetCookie(w, cookie)
-
-	return nil
-}
-
-func (s *cookieStore[T]) generateChallenge(r *http.Request, sctx *Session[T], isRegister bool) (string, error) {
-	return "", errors.New("DBSC requires a KV-backed session manager")
-}
-
-func (s *cookieStore[T]) verifyChallenge(r *http.Request, sctx *Session[T], challengeStr string, isRegister bool) error {
-	return errors.New("DBSC requires a KV-backed session manager")
-}
-
-func (s *cookieStore[T]) consumeChallenge(r *http.Request, sctx *Session[T], challengeStr string) error {
-	return errors.New("DBSC requires a KV-backed session manager")
+	return s.writeCookie(w, expiresAt, data)
 }

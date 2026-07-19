@@ -34,29 +34,18 @@ func (m *Manager[T]) ensureSessionLoaded(w http.ResponseWriter, r *http.Request,
 		return sctx.aborted
 	}
 
-	var abort bool
-	sctx.loadOnce.Do(func() {
-		decodedData, data, err := m.loadSession(r)
-		if err != nil {
-			abort = true
-			m.handleErr(w, r, err)
-			return
-		} else if data != nil {
-			sctx.sessdata = decodedData
-			sctx.isNew = false
-			if m.opts.IdleTimeout != 0 {
-				sctx.datab = data
-			}
-			if m.opts.Onload != nil {
-				sctx.sessdata.Data = m.opts.Onload(sctx.sessdata.Data)
-			}
-		}
-		sctx.loaded = true
+	decodedData, data, err := m.loadSession(r)
+	if err != nil {
+		m.handleErr(w, r, err)
+		sctx.aborted = true
+		return true
+	}
+	m.installLoadedSession(sctx, decodedData, data)
 
-		if m.opts.DBSCRefreshInterval > 0 && len(sctx.sessdata.DBSCPublicJWKS) > 0 {
-			abort = m.runDBSCInBand(w, r, sctx)
-		}
-	})
+	abort := false
+	if m.opts.DBSCRefreshInterval > 0 && len(sctx.sessdata.DBSCPublicJWKS) > 0 {
+		abort = m.runDBSCInBand(w, r, sctx)
+	}
 	if abort {
 		sctx.aborted = true
 	}
@@ -103,7 +92,7 @@ func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx 
 		return true
 	}
 
-	if err := m.store.verifyChallenge(r, sctx, jti, false); err != nil {
+	if err := m.dbscStore.verifyChallenge(r, sctx, jti, false); err != nil {
 		slog.WarnContext(r.Context(), "DBSC challenge verification failed", "err", err)
 		m.dbscIssueInBandChallenge(w, r, sctx)
 		return true
@@ -111,21 +100,17 @@ func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx 
 
 	if err := verifyDBSCResponse(respHeader, sctx.sessdata.DBSCPublicJWKS, jti); err != nil {
 		slog.WarnContext(r.Context(), "DBSC verification failed", "err", err)
-		if err := m.deleteSession(w, r, sctx); err != nil {
-			m.handleErr(w, r, err)
-			return true
-		}
+		sctx.Delete()
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return true
 	}
-	if err := m.store.consumeChallenge(r, sctx, jti); err != nil {
+	if err := m.dbscStore.consumeChallenge(r, sctx, jti); err != nil {
 		m.handleErr(w, r, err)
 		return true
 	}
 
 	sctx.sessdata.DBSCExpiration = time.Now().Add(m.opts.DBSCRefreshInterval)
 	sctx.sessdata.DBSCCurrentCookieID = rand.Text()
-	sctx.save = true
 	sctx.Reset()
 	return false
 }

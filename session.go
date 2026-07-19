@@ -3,7 +3,7 @@ package session
 import (
 	"log/slog"
 	"net/http"
-	"sync"
+	"time"
 )
 
 type sessionContextKey[T any] struct {
@@ -19,25 +19,30 @@ type dbscServeConfig[T any] struct {
 	GenerateChallenge func(r *http.Request, sctx *Session[T], isRegister bool) (string, error)
 }
 
+type sessionState uint8
+
+const (
+	sessionClean sessionState = iota
+	sessionDirty
+	sessionDeleted
+)
+
 // Session represents a tracked web session. A Session is scoped to one HTTP
 // request and must not be accessed concurrently by multiple goroutines.
 type Session[T any] struct {
-	mgr        *Manager[T]
-	reqW       http.ResponseWriter
-	reqR       *http.Request
-	sessdata   persistedSession[T]
-	sessdataMu sync.RWMutex
-	// datab is the original loaded data bytes. Used for idle timeout, when a
-	// save may happen without data modification
-	datab  []byte
-	delete bool
-	save   bool
-	reset  bool
+	mgr      *Manager[T]
+	reqW     http.ResponseWriter
+	reqR     *http.Request
+	sessdata persistedSession[T]
+	// loadedData is the original encoded session. It lets idle-timeout touches
+	// extend storage without re-encoding unchanged application data.
+	loadedData []byte
+	state      sessionState
+	rotate     bool
 
-	isNew    bool
-	loaded   bool
-	aborted  bool
-	loadOnce sync.Once
+	isNew   bool
+	loaded  bool
+	aborted bool
 }
 
 // IsNew reports whether persisted session data has not been loaded from storage.
@@ -45,12 +50,6 @@ type Session[T any] struct {
 // managers, it stays true until a session accessor (Get, Set, etc.) triggers
 // the store read.
 func (s *Session[T]) IsNew() bool {
-	if s.aborted {
-		return s.isNew
-	}
-
-	s.sessdataMu.RLock()
-	defer s.sessdataMu.RUnlock()
 	return s.isNew
 }
 
@@ -58,9 +57,7 @@ func (s *Session[T]) ensureLoaded() {
 	if s.mgr == nil || s.reqW == nil || s.reqR == nil {
 		return
 	}
-	if s.mgr.ensureSessionLoaded(s.reqW, s.reqR, s) {
-		return
-	}
+	s.mgr.ensureSessionLoaded(s.reqW, s.reqR, s)
 }
 
 // Get returns the application data stored in the session.
@@ -75,9 +72,6 @@ func (s *Session[T]) Get() T {
 		return zero
 	}
 
-	s.sessdataMu.RLock()
-	defer s.sessdataMu.RUnlock()
-
 	return s.sessdata.Data
 }
 
@@ -88,11 +82,11 @@ func (s *Session[T]) Set(data T) {
 		return
 	}
 
-	s.sessdataMu.Lock()
-	defer s.sessdataMu.Unlock()
-
-	s.delete = false
-	s.save = true
+	if s.state == sessionDeleted {
+		s.sessdata.CreatedAt = time.Now()
+		s.rotate = true
+	}
+	s.state = sessionDirty
 	s.sessdata.Data = data
 }
 
@@ -100,28 +94,23 @@ func (s *Session[T]) Set(data T) {
 func (s *Session[T]) Delete() {
 	s.ensureLoaded()
 
-	s.sessdataMu.Lock()
-	defer s.sessdataMu.Unlock()
-
-	s.datab = nil
+	s.loadedData = nil
 	s.sessdata = persistedSession[T]{}
 	s.isNew = true
-	s.delete = true
-	s.save = false
-	s.reset = false
+	s.state = sessionDeleted
+	s.rotate = false
 }
 
 // Reset rotates the session ID to avoid session fixation.
 func (s *Session[T]) Reset() {
 	s.ensureLoaded()
 
-	s.sessdataMu.Lock()
-	defer s.sessdataMu.Unlock()
-
-	s.datab = nil
-	s.save = false
-	s.delete = false
-	s.reset = true
+	s.loadedData = nil
+	if s.sessdata.CreatedAt.IsZero() {
+		s.sessdata.CreatedAt = time.Now()
+	}
+	s.state = sessionDirty
+	s.rotate = true
 	s.isNew = true
 }
 
@@ -157,7 +146,8 @@ func (s *Session[T]) FlashMessage() string {
 
 	// Clear the flash, it's been read
 	s.sessdata.FlashMsg = ""
-	s.save = true
+	s.sessdata.Flash = flashLevelNone
+	s.state = sessionDirty
 
 	return flash
 }
@@ -169,7 +159,7 @@ func (s *Session[T]) SetFlashError(message string) {
 	}
 	s.sessdata.FlashMsg = message
 	s.sessdata.Flash = flashLevelError
-	s.save = true
+	s.state = sessionDirty
 }
 
 func (s *Session[T]) SetFlashMessage(message string) {
@@ -179,7 +169,7 @@ func (s *Session[T]) SetFlashMessage(message string) {
 	}
 	s.sessdata.FlashMsg = message
 	s.sessdata.Flash = flashLevelInfo
-	s.save = true
+	s.state = sessionDirty
 }
 
 // IsDeviceBound returns true if the session is cryptographically bound to a device.
@@ -189,8 +179,6 @@ func (s *Session[T]) IsDeviceBound() bool {
 		return false
 	}
 
-	s.sessdataMu.RLock()
-	defer s.sessdataMu.RUnlock()
 	return len(s.sessdata.DBSCPublicJWKS) > 0
 }
 

@@ -131,6 +131,75 @@ func TestDBSCConcurrentRefreshChallenges(t *testing.T) {
 	}
 }
 
+func TestDBSCRegistrationAndRefreshCommitOnce(t *testing.T) {
+	ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
+	_, handler, privKey, _ := setupDBSCHandler(t, ckv, 5*time.Minute)
+	_, dbscSessionID, cookies := completeDBSCRegistration(t, handler, privKey, nil)
+	if got := ckv.setCount(); got != 2 {
+		t.Fatalf("registration KV sets = %d, want 2 (initial session and registration)", got)
+	}
+
+	reqChallenge := newTestRequest(http.MethodPost, "/dbsc/refresh", nil)
+	addCookies(reqChallenge, cookies)
+	reqChallenge.Header.Set("Sec-Secure-Session-Id", `"`+dbscSessionID+`"`)
+	rrChallenge := httptest.NewRecorder()
+	handler.ServeHTTP(rrChallenge, reqChallenge)
+	nonce := challengeNonceFromHeader(t, rrChallenge.Header().Get("Secure-Session-Challenge"))
+	cookies = mergeCookies(cookies, extractCookies(rrChallenge))
+
+	beforeProof := ckv.setCount()
+	reqProof := newTestRequest(http.MethodPost, "/dbsc/refresh", nil)
+	addCookies(reqProof, cookies)
+	reqProof.Header.Set("Sec-Secure-Session-Id", `"`+dbscSessionID+`"`)
+	reqProof.Header.Set("Secure-Session-Response", dbscProofJWT(t, privKey, nonce, false))
+	rrProof := httptest.NewRecorder()
+	handler.ServeHTTP(rrProof, reqProof)
+	if rrProof.Code != http.StatusOK {
+		t.Fatalf("refresh proof: got %d %s", rrProof.Code, rrProof.Body.String())
+	}
+	if got := ckv.setCount() - beforeProof; got != 1 {
+		t.Fatalf("refresh proof KV sets = %d, want 1", got)
+	}
+}
+
+func TestDBSCInvalidInBandProofDeletesSession(t *testing.T) {
+	refreshInterval := time.Millisecond
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	_, handler, privKey, _ := setupDBSCHandler(t, kv, refreshInterval)
+	_, _, cookies := completeDBSCRegistration(t, handler, privKey, nil)
+	time.Sleep(refreshInterval + time.Millisecond)
+
+	reqChallenge := newTestRequest(http.MethodGet, "/protected", nil)
+	addCookies(reqChallenge, cookies)
+	rrChallenge := httptest.NewRecorder()
+	handler.ServeHTTP(rrChallenge, reqChallenge)
+	nonce := challengeNonceFromHeader(t, rrChallenge.Header().Get("Secure-Session-Challenge"))
+
+	wrongKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqProof := newTestRequest(http.MethodGet, "/protected", nil)
+	addCookies(reqProof, cookies)
+	reqProof.Header.Set("Secure-Session-Response", dbscProofJWT(t, wrongKey, nonce, false))
+	rrProof := httptest.NewRecorder()
+	handler.ServeHTTP(rrProof, reqProof)
+	if rrProof.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid proof: got %d, want 401", rrProof.Code)
+	}
+
+	reqReplay := newTestRequest(http.MethodGet, "/protected", nil)
+	addCookies(reqReplay, cookies)
+	rrReplay := httptest.NewRecorder()
+	handler.ServeHTTP(rrReplay, reqReplay)
+	if rrReplay.Code != http.StatusUnauthorized {
+		t.Fatalf("deleted session replay: got %d, want 401", rrReplay.Code)
+	}
+	if rrReplay.Header().Get("Secure-Session-Challenge") != "" {
+		t.Fatal("deleted session was restored and issued another DBSC challenge")
+	}
+}
+
 func testDBSCRegistrationCrossSiteRejected(t *testing.T) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}
@@ -337,7 +406,7 @@ func testDBSCInBandChallenge(t *testing.T, refreshInterval time.Duration) {
 	}
 }
 
-func setupDBSCHandler(t *testing.T, kv *memoryKV, refreshInterval time.Duration) (*Manager[testSessionData], http.Handler, *ecdsa.PrivateKey, *http.Cookie) {
+func setupDBSCHandler(t *testing.T, kv KV, refreshInterval time.Duration) (*Manager[testSessionData], http.Handler, *ecdsa.PrivateKey, *http.Cookie) {
 	t.Helper()
 	opts := &KVManagerOpts[testSessionData]{
 		IdleTimeout:          time.Hour,

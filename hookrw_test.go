@@ -11,7 +11,7 @@ import (
 func TestHookRWForwardsOptionalInterfaces(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	hookCalls := 0
-	h := &hookRW[struct{}]{
+	h := &hookRW{
 		ResponseWriter: recorder,
 		hook: func(http.ResponseWriter) bool {
 			hookCalls++
@@ -34,5 +34,30 @@ func TestHookRWForwardsOptionalInterfaces(t *testing.T) {
 	}
 	if err := h.Push("/asset", nil); !errors.Is(err, http.ErrNotSupported) {
 		t.Fatalf("Push error = %v, want ErrNotSupported", err)
+	}
+}
+
+func TestHookRWRemembersRejectedCommit(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	hookCalls := 0
+	h := &hookRW{
+		ResponseWriter: recorder,
+		hook: func(http.ResponseWriter) bool {
+			hookCalls++
+			return false
+		},
+	}
+
+	if _, err := h.Write([]byte("first")); err == nil {
+		t.Fatal("first write succeeded after rejected commit")
+	}
+	if _, err := h.Write([]byte("second")); err == nil {
+		t.Fatal("second write succeeded after rejected commit")
+	}
+	if hookCalls != 1 {
+		t.Fatalf("hook called %d times, want 1", hookCalls)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("response body = %q, want empty", recorder.Body.String())
 	}
 }

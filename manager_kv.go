@@ -147,21 +147,10 @@ func (s *kvStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt time
 		return fmt.Errorf("storing in KV: %w", err)
 	}
 
-	// Set session ID cookie
-	cookieValue, err := s.signSessionID(sessionID)
-	if err != nil {
-		return err
-	}
-	cookie := s.cookieSettings.newCookie(expiresAt)
-	cookie.Value = cookieValue
-
-	managerRemoveCookieByName(w, cookie.Name)
-	http.SetCookie(w, cookie)
-
-	return nil
+	return s.writeSessionCookie(w, expiresAt, sessionID)
 }
 
-func (s *kvStore[T]) delete(w http.ResponseWriter, r *http.Request) error {
+func (s *kvStore[T]) delete(r *http.Request) error {
 	sessionID := getManagerSessionIDFromContext(r, s.m)
 	if sessionID == "" {
 		// Try to get from cookie
@@ -207,7 +196,10 @@ func (s *kvStore[T]) touch(w http.ResponseWriter, r *http.Request, expiresAt tim
 		return fmt.Errorf("updating KV expiry: %w", err)
 	}
 
-	// Update cookie expiry
+	return s.writeSessionCookie(w, expiresAt, sessionID)
+}
+
+func (s *kvStore[T]) writeSessionCookie(w http.ResponseWriter, expiresAt time.Time, sessionID string) error {
 	cookieValue, err := s.signSessionID(sessionID)
 	if err != nil {
 		return err
@@ -224,16 +216,12 @@ func (s *kvStore[T]) touch(w http.ResponseWriter, r *http.Request, expiresAt tim
 func (s *kvStore[T]) generateChallenge(r *http.Request, sctx *Session[T], isRegister bool) (string, error) {
 	challenge := rand.Text()
 	if isRegister {
-		sctx.sessdataMu.Lock()
 		sctx.sessdata.DBSCRegistrationChallenge = challenge
-		sctx.save = true
-		sctx.sessdataMu.Unlock()
+		sctx.state = sessionDirty
 		return challenge, nil
 	}
 
-	sctx.sessdataMu.RLock()
 	sessionID := sctx.sessdata.DBSCSessionID
-	sctx.sessdataMu.RUnlock()
 	if sessionID == "" {
 		return "", errors.New("cannot issue refresh challenge without DBSC session ID")
 	}
@@ -244,9 +232,7 @@ func (s *kvStore[T]) generateChallenge(r *http.Request, sctx *Session[T], isRegi
 }
 
 func (s *kvStore[T]) verifyChallenge(r *http.Request, sctx *Session[T], challengeStr string, isRegister bool) error {
-	sctx.sessdataMu.RLock()
 	if isRegister {
-		defer sctx.sessdataMu.RUnlock()
 		if sctx.sessdata.DBSCRegistrationChallenge == "" || sctx.sessdata.DBSCRegistrationChallenge != challengeStr {
 			return errors.New("registration challenge mismatch or missing")
 		}
@@ -255,7 +241,6 @@ func (s *kvStore[T]) verifyChallenge(r *http.Request, sctx *Session[T], challeng
 	sessionID := sctx.sessdata.DBSCSessionID
 	legacyChallenge := sctx.sessdata.DBSCChallenge
 	legacyIssuedAt := sctx.sessdata.DBSCChallengeIssuedAt
-	sctx.sessdataMu.RUnlock()
 
 	data, found, err := s.kv.Get(r.Context(), dbscChallengeKey(sessionID, challengeStr))
 	if err != nil {
@@ -273,14 +258,12 @@ func (s *kvStore[T]) verifyChallenge(r *http.Request, sctx *Session[T], challeng
 }
 
 func (s *kvStore[T]) consumeChallenge(r *http.Request, sctx *Session[T], challengeStr string) error {
-	sctx.sessdataMu.Lock()
 	sessionID := sctx.sessdata.DBSCSessionID
 	if sctx.sessdata.DBSCChallenge == challengeStr {
 		sctx.sessdata.DBSCChallenge = ""
 		sctx.sessdata.DBSCChallengeIssuedAt = time.Time{}
-		sctx.save = true
+		sctx.state = sessionDirty
 	}
-	sctx.sessdataMu.Unlock()
 	if err := s.kv.Delete(r.Context(), dbscChallengeKey(sessionID, challengeStr)); err != nil {
 		return fmt.Errorf("consuming DBSC challenge: %w", err)
 	}

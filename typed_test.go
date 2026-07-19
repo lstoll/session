@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 type testSessionData struct {
@@ -10,6 +11,33 @@ type testSessionData struct {
 	Value     string
 	Bootstrap string
 	Number    int
+}
+
+func TestSessionDeleteThenSetStartsFreshSession(t *testing.T) {
+	sess := &Session[testSessionData]{
+		sessdata: persistedSession[testSessionData]{CreatedAt: time.Now().Add(-time.Hour)},
+	}
+
+	sess.Delete()
+	sess.Set(testSessionData{User: "alice"})
+
+	if sess.state != sessionDirty || !sess.rotate {
+		t.Fatalf("state = %v, rotate = %v; want dirty, true", sess.state, sess.rotate)
+	}
+	if sess.sessdata.CreatedAt.IsZero() {
+		t.Fatal("Set after Delete left CreatedAt unset")
+	}
+}
+
+func TestFlashMessageClearsFlashState(t *testing.T) {
+	sess := &Session[testSessionData]{}
+	sess.SetFlashError("try again")
+	if got := sess.FlashMessage(); got != "try again" {
+		t.Fatalf("FlashMessage = %q, want try again", got)
+	}
+	if sess.HasFlash() {
+		t.Fatal("HasFlash remained true after consuming message")
+	}
 }
 
 func setTestUser(s *Session[testSessionData], value string) {
