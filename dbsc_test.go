@@ -76,30 +76,30 @@ func challengeFromSecureSessionRegistration(t *testing.T, reg string) string {
 func TestDBSC(t *testing.T) {
 	t.Run("KV Store", func(t *testing.T) {
 		t.Run("refresh_endpoint", func(t *testing.T) {
-			testDBSCRefreshEndpoint(t, 5*time.Minute, false)
+			testDBSCRefreshEndpoint(t, 5*time.Minute)
 		})
 		t.Run("in_band_challenge", func(t *testing.T) {
-			testDBSCInBandChallenge(t, time.Millisecond, false)
+			testDBSCInBandChallenge(t, time.Millisecond)
 		})
 		t.Run("skipped_header_rejected", func(t *testing.T) {
-			testDBSCSkippedRejected(t, false)
+			testDBSCSkippedRejected(t)
 		})
 		t.Run("registration_chrome_jwk", func(t *testing.T) {
-			testDBSCRegistrationChromeJWK(t, false)
+			testDBSCRegistrationChromeJWK(t)
 		})
 		t.Run("registration_stale_iat_rejected", func(t *testing.T) {
-			testDBSCRegistrationStaleIATRejected(t, false)
+			testDBSCRegistrationStaleIATRejected(t)
 		})
 		t.Run("registration_cross_site_rejected", func(t *testing.T) {
-			testDBSCRegistrationCrossSiteRejected(t, false)
+			testDBSCRegistrationCrossSiteRejected(t)
 		})
 	})
 }
 
 func TestDBSCConcurrentRefreshChallenges(t *testing.T) {
 	kv := &memoryKV{contents: make(map[string]kvItem)}
-	store := &kvStore{kv: kv}
-	sctx := &Session{sessdata: persistedSession{DBSCSessionID: "dbsc-session"}}
+	store := &kvStore[testSessionData]{kv: kv}
+	sctx := &Session[testSessionData]{sessdata: persistedSession[testSessionData]{DBSCSessionID: "dbsc-session"}}
 	req := httptest.NewRequest(http.MethodPost, "/dbsc/refresh", nil)
 
 	first, err := store.generateChallenge(req, sctx, false)
@@ -131,10 +131,10 @@ func TestDBSCConcurrentRefreshChallenges(t *testing.T) {
 	}
 }
 
-func testDBSCRegistrationCrossSiteRejected(t *testing.T, useCookie bool) {
+func testDBSCRegistrationCrossSiteRejected(t *testing.T) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}
-	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute, useCookie)
+	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute)
 
 	req0 := newTestRequest(http.MethodGet, "/start", nil)
 	rr0 := httptest.NewRecorder()
@@ -154,10 +154,10 @@ func testDBSCRegistrationCrossSiteRejected(t *testing.T, useCookie bool) {
 	}
 }
 
-func testDBSCRegistrationStaleIATRejected(t *testing.T, useCookie bool) {
+func testDBSCRegistrationStaleIATRejected(t *testing.T) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}
-	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute, useCookie)
+	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute)
 
 	req0 := newTestRequest(http.MethodGet, "/start", nil)
 	rr0 := httptest.NewRecorder()
@@ -176,10 +176,10 @@ func testDBSCRegistrationStaleIATRejected(t *testing.T, useCookie bool) {
 	}
 }
 
-func testDBSCRegistrationChromeJWK(t *testing.T, useCookie bool) {
+func testDBSCRegistrationChromeJWK(t *testing.T) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}
-	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute, useCookie)
+	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute)
 
 	req0 := newTestRequest(http.MethodGet, "/start", nil)
 	rr0 := httptest.NewRecorder()
@@ -198,51 +198,10 @@ func testDBSCRegistrationChromeJWK(t *testing.T, useCookie bool) {
 	}
 }
 
-func testDBSCRegistrationChallengeSessionBound(t *testing.T, useCookie bool) {
-	t.Helper()
-	if !useCookie {
-		t.Skip("registration challenge binding is cookie-store specific")
-	}
-
-	kv := &memoryKV{contents: make(map[string]kvItem)}
-	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute, useCookie)
-
-	reqA := newTestRequest(http.MethodGet, "/start", nil)
-	rrA := httptest.NewRecorder()
-	handler.ServeHTTP(rrA, reqA)
-	challengeA := challengeFromSecureSessionRegistration(t, rrA.Header().Get("Secure-Session-Registration"))
-	cookiesA := extractCookies(rrA)
-
-	reqB := newTestRequest(http.MethodGet, "/start", nil)
-	rrB := httptest.NewRecorder()
-	handler.ServeHTTP(rrB, reqB)
-	cookiesB := extractCookies(rrB)
-
-	regJWT := dbscProofJWT(t, privKey, challengeA, true)
-	reqCross := newTestRequest(http.MethodPost, "/register", nil)
-	addCookies(reqCross, cookiesB)
-	reqCross.Header.Set("Secure-Session-Response", regJWT)
-	rrCross := httptest.NewRecorder()
-	handler.ServeHTTP(rrCross, reqCross)
-	if rrCross.Code != http.StatusUnauthorized {
-		t.Fatalf("cross-session registration challenge: got %v want 401", rrCross.Code)
-	}
-
-	regJWT = dbscProofJWT(t, privKey, challengeA, true)
-	reqOK := newTestRequest(http.MethodPost, "/register", nil)
-	addCookies(reqOK, cookiesA)
-	reqOK.Header.Set("Secure-Session-Response", regJWT)
-	rrOK := httptest.NewRecorder()
-	handler.ServeHTTP(rrOK, reqOK)
-	if rrOK.Code != http.StatusOK {
-		t.Fatalf("same-session registration challenge: got %v %s", rrOK.Code, rrOK.Body.String())
-	}
-}
-
-func testDBSCRefreshEndpoint(t *testing.T, refreshInterval time.Duration, useCookie bool) {
+func testDBSCRefreshEndpoint(t *testing.T, refreshInterval time.Duration) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}
-	_, handler, privKey, _ := setupDBSCHandler(t, kv, refreshInterval, useCookie)
+	_, handler, privKey, _ := setupDBSCHandler(t, kv, refreshInterval)
 
 	_, dbscSessionID, cookies := completeDBSCRegistration(t, handler, privKey, nil)
 
@@ -291,10 +250,10 @@ func testDBSCRefreshEndpoint(t *testing.T, refreshInterval time.Duration, useCoo
 	}
 }
 
-func testDBSCSkippedRejected(t *testing.T, useCookie bool) {
+func testDBSCSkippedRejected(t *testing.T) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}
-	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute, useCookie)
+	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute)
 
 	_, dbscSessionID, cookies := completeDBSCRegistration(t, handler, privKey, nil)
 
@@ -322,10 +281,10 @@ func testDBSCSkippedRejected(t *testing.T, useCookie bool) {
 	})
 }
 
-func testDBSCInBandChallenge(t *testing.T, refreshInterval time.Duration, useCookie bool) {
+func testDBSCInBandChallenge(t *testing.T, refreshInterval time.Duration) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}
-	_, handler, privKey, _ := setupDBSCHandler(t, kv, refreshInterval, useCookie)
+	_, handler, privKey, _ := setupDBSCHandler(t, kv, refreshInterval)
 
 	_, dbscSessionID, cookies := completeDBSCRegistration(t, handler, privKey, nil)
 
@@ -378,39 +337,16 @@ func testDBSCInBandChallenge(t *testing.T, refreshInterval time.Duration, useCoo
 	}
 }
 
-func setupDBSCHandler(t *testing.T, kv *memoryKV, refreshInterval time.Duration, useCookie bool) (*Manager, http.Handler, *ecdsa.PrivateKey, *http.Cookie) {
+func setupDBSCHandler(t *testing.T, kv *memoryKV, refreshInterval time.Duration) (*Manager[testSessionData], http.Handler, *ecdsa.PrivateKey, *http.Cookie) {
 	t.Helper()
-	var mgr *Manager
-	var err error
-
-	if useCookie {
-		aead := newTestAEAD(t)
-		opts := &CookieManagerOpts{
-			ManagerOpts: ManagerOpts{
-				IdleTimeout:          time.Hour,
-				DBSCRefreshInterval:  refreshInterval,
-				DBSCRegistrationPath: "/register",
-				DBSCRefreshPath:      "/dbsc/refresh",
-				DBSCOrigin:           "https://example.com",
-				CookieOpts: &SessionCookieOpts{
-					Name: "__Host-session-id",
-					Path: "/",
-				},
-			},
-		}
-		mgr, err = NewCookieManager(aead, opts)
-	} else {
-		opts := &KVManagerOpts{
-			ManagerOpts: ManagerOpts{
-				IdleTimeout:          time.Hour,
-				DBSCRefreshInterval:  refreshInterval,
-				DBSCRegistrationPath: "/register",
-				DBSCRefreshPath:      "/dbsc/refresh",
-				DBSCOrigin:           "https://example.com",
-			},
-		}
-		mgr, err = NewKVManager(kv, opts)
+	opts := &KVManagerOpts[testSessionData]{
+		IdleTimeout:          time.Hour,
+		DBSCRefreshInterval:  refreshInterval,
+		DBSCRegistrationPath: "/register",
+		DBSCRefreshPath:      "/dbsc/refresh",
+		DBSCOrigin:           "https://example.com",
 	}
+	mgr, err := NewKVManager[testSessionData](kv, opts)
 
 	if err != nil {
 		t.Fatalf("creating manager: %v", err)
@@ -423,10 +359,12 @@ func setupDBSCHandler(t *testing.T, kv *memoryKV, refreshInterval time.Duration,
 		sess := mgr.FromContext(r.Context())
 		switch r.URL.Path {
 		case "/start":
-			sess.Set("bootstrap", "1")
+			data := sess.Get()
+			data.Bootstrap = "1"
+			sess.Set(data)
 			w.WriteHeader(http.StatusOK)
 		default:
-			if sess.Get("bootstrap") == nil {
+			if sess.Get().Bootstrap == "" {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}

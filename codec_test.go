@@ -6,14 +6,14 @@ import (
 
 func TestGobEncoding(t *testing.T) {
 	// Create a sample data map similar to what's used in the E2E test
-	data := map[string]any{
-		"test0": "value0",
-		"test1": "value1",
+	data := testSessionData{
+		User:  "alice",
+		Value: "value0",
 	}
 
 	// Encode the data
-	g := &gobCodec{}
-	encodedData, err := g.Encode(persistedSession{
+	g := &gobCodec[testSessionData]{}
+	encodedData, err := g.Encode(persistedSession[testSessionData]{
 		Data: data,
 	})
 	if err != nil {
@@ -27,7 +27,7 @@ func TestGobEncoding(t *testing.T) {
 	}
 
 	// Check if values match
-	if decodedData.Data["test0"] != "value0" || decodedData.Data["test1"] != "value1" {
+	if decodedData.Data != data {
 		t.Fatalf("Data mismatch: %v", decodedData.Data)
 	}
 }

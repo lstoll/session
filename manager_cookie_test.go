@@ -78,13 +78,13 @@ func TestCookieManager_RoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mgr, err := NewCookieManager(aead, &CookieManagerOpts{
-				DisableCompression: tt.compressionDisabled,
-			})
+			mgr, err := NewCookieManager[testSessionData](aead, &CookieManagerOpts[testSessionData]{
+				DisableCompression: tt.compressionDisabled})
+
 			if err != nil {
 				t.Fatal(err)
 			}
-			cs := mgr.store.(*cookieStore)
+			cs := mgr.store.(*cookieStore[testSessionData])
 
 			w := httptest.NewRecorder()
 
@@ -149,11 +149,11 @@ func TestCookieManager_ExtremelyLargeData(t *testing.T) {
 	aead := newTestAEAD(t)
 
 	// Create a manager
-	mgr, err := NewCookieManager(aead, nil)
+	mgr, err := NewCookieManager[testSessionData](aead, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs := mgr.store.(*cookieStore)
+	cs := mgr.store.(*cookieStore[testSessionData])
 
 	largeData := randBytes(managerMaxCookieSize)
 	expiresAt := time.Now().Add(1 * time.Hour)
@@ -182,11 +182,11 @@ func TestCookieManager_MultipleRoundTrips(t *testing.T) {
 	aead := newTestAEAD(t)
 
 	// Create a manager
-	mgr, err := NewCookieManager(aead, nil)
+	mgr, err := NewCookieManager[testSessionData](aead, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs := mgr.store.(*cookieStore)
+	cs := mgr.store.(*cookieStore[testSessionData])
 
 	originalData := []byte("test data for multiple round trips")
 	expiresAt := time.Now().Add(1 * time.Hour)
@@ -232,11 +232,11 @@ func TestCookieManager_CompressionLogic(t *testing.T) {
 	aead := newTestAEAD(t)
 
 	// Create a manager
-	mgr, err := NewCookieManager(aead, nil)
+	mgr, err := NewCookieManager[testSessionData](aead, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs := mgr.store.(*cookieStore)
+	cs := mgr.store.(*cookieStore[testSessionData])
 
 	largeData := bytes.Repeat([]byte("a"), managerCompressThreshold+1)
 	expiresAt := time.Now().Add(1 * time.Hour)
@@ -287,11 +287,11 @@ func TestCookieManager_MaxSize(t *testing.T) {
 	aead := newTestAEAD(t)
 
 	// Create a manager
-	mgr, err := NewCookieManager(aead, nil)
+	mgr, err := NewCookieManager[testSessionData](aead, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs := mgr.store.(*cookieStore)
+	cs := mgr.store.(*cookieStore[testSessionData])
 
 	sizes := []int{1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000}
 	expiresAt := time.Now().Add(1 * time.Hour)
@@ -329,20 +329,6 @@ func TestCookieManager_MaxSize(t *testing.T) {
 	}
 }
 
-func TestCookieManagerRejectsDBSC(t *testing.T) {
-	aead := newTestAEAD(t)
-	_, err := NewCookieManager(aead, &CookieManagerOpts{
-		ManagerOpts: ManagerOpts{
-			IdleTimeout:         time.Hour,
-			DBSCRefreshInterval: 5 * time.Minute,
-			DBSCOrigin:          "https://example.test",
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "DBSC requires a KV-backed session manager") {
-		t.Fatalf("NewCookieManager error = %v, want KV-backed DBSC error", err)
-	}
-}
-
 func randBytes(n int) []byte {
 	b := make([]byte, n)
 	_, err := rand.Read(b)
@@ -355,7 +341,7 @@ func randBytes(n int) []byte {
 // cookieStoreRoundTripSave and cookieStoreRoundTripLoad exercise the low-level
 // cookie encrypt/compress/format path without going through persistedSession.
 // They live in the test file so production code stays on cookieStore methods.
-func cookieStoreRoundTripSave(cs *cookieStore, w http.ResponseWriter, expiresAt time.Time, data []byte) error {
+func cookieStoreRoundTripSave(cs *cookieStore[testSessionData], w http.ResponseWriter, expiresAt time.Time, data []byte) error {
 	b := make([]byte, 8)
 	binary.LittleEndian.PutUint64(b, uint64(expiresAt.Unix()))
 	dataWithExpiry := append(b, data...)
@@ -389,7 +375,7 @@ func cookieStoreRoundTripSave(cs *cookieStore, w http.ResponseWriter, expiresAt 
 	return nil
 }
 
-func cookieStoreRoundTripLoad(cs *cookieStore, cookieValue string) ([]byte, error) {
+func cookieStoreRoundTripLoad(cs *cookieStore[testSessionData], cookieValue string) ([]byte, error) {
 	sp := strings.SplitN(cookieValue, ".", 3)
 	if len(sp) != 3 {
 		if len(sp) == 2 {

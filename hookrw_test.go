@@ -11,7 +11,7 @@ import (
 func TestHookRWForwardsOptionalInterfaces(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	hookCalls := 0
-	h := &hookRW{
+	h := &hookRW[struct{}]{
 		ResponseWriter: recorder,
 		hook: func(http.ResponseWriter) bool {
 			hookCalls++

@@ -22,19 +22,19 @@ type KV interface {
 
 const managerMACSessionCookieMagic = "MS1"
 
-type kvStore struct {
-	m              *Manager
+type kvStore[T any] struct {
+	m              *Manager[T]
 	kv             KV
-	codec          codec
+	codec          codec[T]
 	cookieSettings SessionCookieOpts
 	mac            tink.MAC
 }
 
-func (s *kvStore) sessionIDMACInput(id string) []byte {
+func (s *kvStore[T]) sessionIDMACInput(id string) []byte {
 	return []byte(s.cookieSettings.Name + ":" + id)
 }
 
-func (s *kvStore) signSessionID(id string) (string, error) {
+func (s *kvStore[T]) signSessionID(id string) (string, error) {
 	if s.mac == nil {
 		return id, nil
 	}
@@ -45,7 +45,7 @@ func (s *kvStore) signSessionID(id string) (string, error) {
 	return managerMACSessionCookieMagic + "." + id + "." + managerCookieValueEncoding.EncodeToString(tag), nil
 }
 
-func (s *kvStore) parseSessionIDCookie(raw string) (id string, ok bool) {
+func (s *kvStore[T]) parseSessionIDCookie(raw string) (id string, ok bool) {
 	if s.mac == nil {
 		if !plausibleSessionID(raw) {
 			return "", false
@@ -72,7 +72,7 @@ func plausibleSessionID(id string) bool {
 	return id != "" && len(id) <= 128
 }
 
-func (s *kvStore) peekSessionID(r *http.Request) bool {
+func (s *kvStore[T]) peekSessionID(r *http.Request) bool {
 	cookie, err := r.Cookie(s.cookieSettings.Name)
 	if err != nil {
 		return false
@@ -85,18 +85,18 @@ func (s *kvStore) peekSessionID(r *http.Request) bool {
 	return true
 }
 
-func (s *kvStore) load(r *http.Request) (persistedSession, []byte, error) {
+func (s *kvStore[T]) load(r *http.Request) (persistedSession[T], []byte, error) {
 	cookie, err := r.Cookie(s.cookieSettings.Name)
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
-			return persistedSession{}, nil, nil
+			return persistedSession[T]{}, nil, nil
 		}
-		return persistedSession{}, nil, fmt.Errorf("getting cookie %s: %w", s.cookieSettings.Name, err)
+		return persistedSession[T]{}, nil, fmt.Errorf("getting cookie %s: %w", s.cookieSettings.Name, err)
 	}
 
 	sessionID, ok := s.parseSessionIDCookie(cookie.Value)
 	if !ok {
-		return persistedSession{}, nil, nil
+		return persistedSession[T]{}, nil, nil
 	}
 	// A client-provided ID is only reusable after the store confirms that it was
 	// issued by this server. Until then, a subsequent save must generate a new ID.
@@ -108,24 +108,24 @@ func (s *kvStore) load(r *http.Request) (persistedSession, []byte, error) {
 	// Get data from KV
 	data, found, err := s.kv.Get(r.Context(), storeKey)
 	if err != nil {
-		return persistedSession{}, nil, fmt.Errorf("getting from KV: %w", err)
+		return persistedSession[T]{}, nil, fmt.Errorf("getting from KV: %w", err)
 	}
 
 	if !found {
-		return persistedSession{}, nil, nil
+		return persistedSession[T]{}, nil, nil
 	}
 
 	// Decode using the codec
 	sess, err := s.codec.Decode(data)
 	if err != nil {
-		return persistedSession{}, nil, fmt.Errorf("decoding session: %w", err)
+		return persistedSession[T]{}, nil, fmt.Errorf("decoding session: %w", err)
 	}
 	setManagerSessionIDInContext(r, s.m, sessionID)
 
 	return sess, data, nil
 }
 
-func (s *kvStore) save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, sess persistedSession) error {
+func (s *kvStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, sess persistedSession[T]) error {
 	// Generate or get session ID
 	sessionID := getManagerSessionIDFromContext(r, s.m)
 	if sessionID == "" {
@@ -161,7 +161,7 @@ func (s *kvStore) save(w http.ResponseWriter, r *http.Request, expiresAt time.Ti
 	return nil
 }
 
-func (s *kvStore) delete(w http.ResponseWriter, r *http.Request) error {
+func (s *kvStore[T]) delete(w http.ResponseWriter, r *http.Request) error {
 	sessionID := getManagerSessionIDFromContext(r, s.m)
 	if sessionID == "" {
 		// Try to get from cookie
@@ -186,7 +186,7 @@ func (s *kvStore) delete(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (s *kvStore) touch(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
+func (s *kvStore[T]) touch(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
 	// Get session ID
 	sessionID := getManagerSessionIDFromContext(r, s.m)
 	if sessionID == "" {
@@ -221,7 +221,7 @@ func (s *kvStore) touch(w http.ResponseWriter, r *http.Request, expiresAt time.T
 	return nil
 }
 
-func (s *kvStore) generateChallenge(r *http.Request, sctx *Session, isRegister bool) (string, error) {
+func (s *kvStore[T]) generateChallenge(r *http.Request, sctx *Session[T], isRegister bool) (string, error) {
 	challenge := rand.Text()
 	if isRegister {
 		sctx.sessdataMu.Lock()
@@ -243,7 +243,7 @@ func (s *kvStore) generateChallenge(r *http.Request, sctx *Session, isRegister b
 	return challenge, nil
 }
 
-func (s *kvStore) verifyChallenge(r *http.Request, sctx *Session, challengeStr string, isRegister bool) error {
+func (s *kvStore[T]) verifyChallenge(r *http.Request, sctx *Session[T], challengeStr string, isRegister bool) error {
 	sctx.sessdataMu.RLock()
 	if isRegister {
 		defer sctx.sessdataMu.RUnlock()
@@ -272,7 +272,7 @@ func (s *kvStore) verifyChallenge(r *http.Request, sctx *Session, challengeStr s
 	return errors.New("refresh challenge mismatch, missing, or expired")
 }
 
-func (s *kvStore) consumeChallenge(r *http.Request, sctx *Session, challengeStr string) error {
+func (s *kvStore[T]) consumeChallenge(r *http.Request, sctx *Session[T], challengeStr string) error {
 	sctx.sessdataMu.Lock()
 	sessionID := sctx.sessdata.DBSCSessionID
 	if sctx.sessdata.DBSCChallenge == challengeStr {

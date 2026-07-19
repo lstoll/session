@@ -11,13 +11,13 @@ type sessionIDPeeker interface {
 	peekSessionID(r *http.Request) bool
 }
 
-func (m *Manager) isDBSCRegistrationRequest(r *http.Request) bool {
+func (m *Manager[T]) isDBSCRegistrationRequest(r *http.Request) bool {
 	return m.opts.DBSCRefreshInterval > 0 &&
 		r.Method == http.MethodPost &&
 		r.URL.Path == m.dbscRegistrationPath()
 }
 
-func (m *Manager) isDBSCRefreshRequest(r *http.Request) bool {
+func (m *Manager[T]) isDBSCRefreshRequest(r *http.Request) bool {
 	return m.opts.DBSCRefreshInterval > 0 &&
 		r.Method == http.MethodPost &&
 		r.URL.Path == m.dbscRefreshPath()
@@ -26,7 +26,7 @@ func (m *Manager) isDBSCRefreshRequest(r *http.Request) bool {
 // ensureSessionLoaded loads persisted session state on first use. For lazy KV
 // managers it also runs in-band DBSC enforcement. Returns true when the
 // response has been handled and the request should not continue.
-func (m *Manager) ensureSessionLoaded(w http.ResponseWriter, r *http.Request, sctx *Session) bool {
+func (m *Manager[T]) ensureSessionLoaded(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
 	if !m.lazyLoad {
 		return sctx.aborted
 	}
@@ -66,7 +66,7 @@ func (m *Manager) ensureSessionLoaded(w http.ResponseWriter, r *http.Request, sc
 // rejectDBSCSkipped rejects requests where the client could not complete DBSC.
 // Sec-Secure-Session-Skipped is a diagnostic header from the browser; it must
 // not bypass device binding. Returns true when a 401 was written.
-func (m *Manager) rejectDBSCSkipped(w http.ResponseWriter, r *http.Request) bool {
+func (m *Manager[T]) rejectDBSCSkipped(w http.ResponseWriter, r *http.Request) bool {
 	if !dbscSessionSkipped(r) {
 		return false
 	}
@@ -77,7 +77,7 @@ func (m *Manager) rejectDBSCSkipped(w http.ResponseWriter, r *http.Request) bool
 
 // runDBSCInBand enforces device-bound session freshness. Returns true when a
 // challenge or error response was written to w.
-func (m *Manager) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx *Session) bool {
+func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
 	if m.rejectDBSCSkipped(w, r) {
 		return true
 	}

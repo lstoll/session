@@ -18,7 +18,7 @@ func TestE2E(t *testing.T) {
 	aead := newTestAEAD(t)
 
 	t.Run("KV Manager", func(t *testing.T) {
-		mgr, err := NewKVManager(&memoryKV{contents: make(map[string]kvItem)}, nil)
+		mgr, err := NewKVManager[testSessionData](&memoryKV{contents: make(map[string]kvItem)}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -26,9 +26,9 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("KV Manager with session ID MAC", func(t *testing.T) {
-		mgr, err := NewKVManager(&memoryKV{contents: make(map[string]kvItem)}, &KVManagerOpts{
-			SessionIDMAC: newTestMAC(t),
-		})
+		mgr, err := NewKVManager[testSessionData](&memoryKV{contents: make(map[string]kvItem)}, &KVManagerOpts[testSessionData]{
+			SessionIDMAC: newTestMAC(t)})
+
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -36,7 +36,7 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("Cookie Manager", func(t *testing.T) {
-		mgr, err := NewCookieManager(aead, nil)
+		mgr, err := NewCookieManager[testSessionData](aead, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -44,16 +44,10 @@ func TestE2E(t *testing.T) {
 	})
 }
 
-func runE2ETest(t testing.TB, mgr *Manager, testReset bool) {
+func runE2ETest(t testing.TB, mgr *Manager[testSessionData], testReset bool) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /set", func(w http.ResponseWriter, r *http.Request) {
-		key := r.URL.Query().Get("key")
-		if key == "" {
-			http.Error(w, "query with no key", http.StatusInternalServerError)
-			return
-		}
-
 		value := r.URL.Query().Get("value")
 		if value == "" {
 			t.Logf("query with no value")
@@ -61,25 +55,20 @@ func runE2ETest(t testing.TB, mgr *Manager, testReset bool) {
 			return
 		}
 
-		// Log the key/value being set for debugging
-		t.Logf("Setting session key=%s, value=%s", key, value)
+		t.Logf("Setting session value=%s", value)
 		sess := mgr.FromContext(r.Context())
-		sess.Set(key, value)
+		data := sess.Get()
+		data.Value = value
+		sess.Set(data)
 	})
 
 	mux.HandleFunc("GET /get", func(w http.ResponseWriter, r *http.Request) {
-		key := r.URL.Query().Get("key")
-		if key == "" {
-			t.Fatal("query with no key")
-		}
-
 		sess := mgr.FromContext(r.Context())
 		t.Logf("Session data in context: %+v", sess.sessdata.Data)
 
-		value, ok := sess.Get(key).(string)
-		if !ok {
-			t.Logf("Key %s not found in session or not a string: %v", key, sess.Get(key))
-			http.Error(w, "key not in session", http.StatusNotFound)
+		value := sess.Get().Value
+		if value == "" {
+			http.Error(w, "value not in session", http.StatusNotFound)
 			return
 		}
 
@@ -110,16 +99,10 @@ func runE2ETest(t testing.TB, mgr *Manager, testReset bool) {
 	}
 
 	for i := range 5 {
-		doReq(t, client, svr.URL+fmt.Sprintf("/set?key=test%d&value=value%d", i, i), http.StatusOK)
-	}
-
-	// now ensure all 5 values are there
-	for i := range 5 {
-		resp := doReq(t, client, svr.URL+fmt.Sprintf("/get?key=test%d", i), http.StatusOK)
+		doReq(t, client, svr.URL+fmt.Sprintf("/set?value=value%d", i), http.StatusOK)
+		resp := doReq(t, client, svr.URL+"/get", http.StatusOK)
 		if resp != fmt.Sprintf("value%d", i) {
 			t.Fatalf("wanted returned value value%d, got: %s", i, resp)
-		} else {
-			t.Logf("got value%d", i)
 		}
 	}
 
@@ -135,17 +118,16 @@ func runE2ETest(t testing.TB, mgr *Manager, testReset bool) {
 		}
 
 		doReq(t, client, svr.URL+"/reset", http.StatusOK)
-		doReq(t, client, svr.URL+"/get?key=test1", http.StatusOK)
+		doReq(t, client, svr.URL+"/get", http.StatusOK)
 
 		// this should fail, as the old session should no longer be accessible under
 		// this ID.
-		doReq(t, oldClient, svr.URL+"/get?key=test1", http.StatusNotFound)
+		doReq(t, oldClient, svr.URL+"/get", http.StatusNotFound)
 
 		// clear it, and make sure it doesn't work
 		for _, c := range []*http.Client{client, oldClient} {
 			doReq(t, c, svr.URL+"/clear", http.StatusOK)
-			doReq(t, c, svr.URL+"/get?key=test1", http.StatusNotFound)
-			doReq(t, c, svr.URL+"/get?key=reset1", http.StatusNotFound)
+			doReq(t, c, svr.URL+"/get", http.StatusNotFound)
 		}
 	}
 }

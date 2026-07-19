@@ -2,34 +2,30 @@ package session
 
 import (
 	"log/slog"
-	"maps"
 	"net/http"
 	"sync"
 )
 
-type sessionContextKey struct {
-	manager *Manager
+type sessionContextKey[T any] struct {
+	manager *Manager[T]
 }
-
-// testSessionContextKey is used only by TestContext; it is not manager-scoped.
-type testSessionContextKey struct{}
 
 // dbscServeConfigKey is used by Manager.Wrap to pass registration path into
 // InitiateDBSCRegistration.
 type dbscServeConfigKey struct{}
 
-type dbscServeConfig struct {
+type dbscServeConfig[T any] struct {
 	RegistrationPath  string
-	GenerateChallenge func(r *http.Request, sctx *Session, isRegister bool) (string, error)
+	GenerateChallenge func(r *http.Request, sctx *Session[T], isRegister bool) (string, error)
 }
 
 // Session represents a tracked web session. A Session is scoped to one HTTP
 // request and must not be accessed concurrently by multiple goroutines.
-type Session struct {
-	mgr        *Manager
+type Session[T any] struct {
+	mgr        *Manager[T]
 	reqW       http.ResponseWriter
 	reqR       *http.Request
-	sessdata   persistedSession
+	sessdata   persistedSession[T]
 	sessdataMu sync.RWMutex
 	// datab is the original loaded data bytes. Used for idle timeout, when a
 	// save may happen without data modification
@@ -48,7 +44,7 @@ type Session struct {
 // It is true for brand-new sessions and after Reset or Delete. On lazy-loaded
 // managers, it stays true until a session accessor (Get, Set, etc.) triggers
 // the store read.
-func (s *Session) IsNew() bool {
+func (s *Session[T]) IsNew() bool {
 	if s.aborted {
 		return s.isNew
 	}
@@ -58,7 +54,7 @@ func (s *Session) IsNew() bool {
 	return s.isNew
 }
 
-func (s *Session) ensureLoaded() {
+func (s *Session[T]) ensureLoaded() {
 	if s.mgr == nil || s.reqW == nil || s.reqR == nil {
 		return
 	}
@@ -67,35 +63,26 @@ func (s *Session) ensureLoaded() {
 	}
 }
 
-// Get returns the value for the given key from the session.
-// If the key doesn't exist, it returns nil.
-func (s *Session) Get(key string) any {
+// Get returns the application data stored in the session.
+//
+// The returned value is a copy of T. If T contains reference types such as
+// maps, slices, or pointers, callers must call Set after making changes so the
+// session is marked for saving.
+func (s *Session[T]) Get() T {
 	s.ensureLoaded()
 	if s.aborted {
-		return nil
+		var zero T
+		return zero
 	}
 
 	s.sessdataMu.RLock()
 	defer s.sessdataMu.RUnlock()
 
-	return s.sessdata.Data[key]
+	return s.sessdata.Data
 }
 
-// GetAll returns a copy of the session data map.
-func (s *Session) GetAll() map[string]any {
-	s.ensureLoaded()
-	if s.aborted {
-		return nil
-	}
-
-	s.sessdataMu.RLock()
-	defer s.sessdataMu.RUnlock()
-
-	return maps.Clone(s.sessdata.Data)
-}
-
-// Set sets a single key-value pair in the session and marks it to be saved.
-func (s *Session) Set(key string, value any) {
+// Set replaces the application data and marks the session for saving.
+func (s *Session[T]) Set(data T) {
 	s.ensureLoaded()
 	if s.aborted {
 		return
@@ -106,36 +93,18 @@ func (s *Session) Set(key string, value any) {
 
 	s.delete = false
 	s.save = true
-	s.sessdata.Data[key] = value
-}
-
-// SetAll sets the entire session data map and marks it to be saved.
-func (s *Session) SetAll(data map[string]any) {
-	s.ensureLoaded()
-	if s.aborted {
-		return
-	}
-
-	s.sessdataMu.Lock()
-	defer s.sessdataMu.Unlock()
-
-	s.delete = false
-	s.save = true
-
 	s.sessdata.Data = data
 }
 
 // Delete marks the session for deletion at the end of the request.
-func (s *Session) Delete() {
+func (s *Session[T]) Delete() {
 	s.ensureLoaded()
 
 	s.sessdataMu.Lock()
 	defer s.sessdataMu.Unlock()
 
 	s.datab = nil
-	s.sessdata = persistedSession{
-		Data: make(map[string]any),
-	}
+	s.sessdata = persistedSession[T]{}
 	s.isNew = true
 	s.delete = true
 	s.save = false
@@ -143,7 +112,7 @@ func (s *Session) Delete() {
 }
 
 // Reset rotates the session ID to avoid session fixation.
-func (s *Session) Reset() {
+func (s *Session[T]) Reset() {
 	s.ensureLoaded()
 
 	s.sessdataMu.Lock()
@@ -157,7 +126,7 @@ func (s *Session) Reset() {
 }
 
 // HasFlash indicates if there is a flash message.
-func (s *Session) HasFlash() bool {
+func (s *Session[T]) HasFlash() bool {
 	s.ensureLoaded()
 	if s.aborted {
 		return false
@@ -166,7 +135,7 @@ func (s *Session) HasFlash() bool {
 }
 
 // FlashIsError indicates that the flash message is an error.
-func (s *Session) FlashIsError() bool {
+func (s *Session[T]) FlashIsError() bool {
 	s.ensureLoaded()
 	if s.aborted {
 		return false
@@ -175,7 +144,7 @@ func (s *Session) FlashIsError() bool {
 }
 
 // FlashMessage returns the current flash message and clears it.
-func (s *Session) FlashMessage() string {
+func (s *Session[T]) FlashMessage() string {
 	s.ensureLoaded()
 	if s.aborted {
 		return ""
@@ -193,7 +162,7 @@ func (s *Session) FlashMessage() string {
 	return flash
 }
 
-func (s *Session) SetFlashError(message string) {
+func (s *Session[T]) SetFlashError(message string) {
 	s.ensureLoaded()
 	if s.aborted {
 		return
@@ -203,7 +172,7 @@ func (s *Session) SetFlashError(message string) {
 	s.save = true
 }
 
-func (s *Session) SetFlashMessage(message string) {
+func (s *Session[T]) SetFlashMessage(message string) {
 	s.ensureLoaded()
 	if s.aborted {
 		return
@@ -214,7 +183,7 @@ func (s *Session) SetFlashMessage(message string) {
 }
 
 // IsDeviceBound returns true if the session is cryptographically bound to a device.
-func (s *Session) IsDeviceBound() bool {
+func (s *Session[T]) IsDeviceBound() bool {
 	s.ensureLoaded()
 	if s.aborted {
 		return false
@@ -227,19 +196,19 @@ func (s *Session) IsDeviceBound() bool {
 
 // InitiateDBSCRegistration adds Secure-Session-Registration immediately.
 // When DBSC is enabled, the manager normally attaches this header automatically
-// on the first HTTP response that persists session data (after Set/SetAll), as
-// long as the session is not yet device-bound and has at least one key in Data.
-// Call this if you need a registration offer without that save (e.g. empty Data)
-// or to replace the current pending challenge.
+// on the first HTTP response that persists session data (after Set), as long
+// as the session is not yet device-bound. Call this if you
+// need a registration offer without saving application data or want to replace
+// the current pending challenge.
 //
 // Requires DBSCRefreshInterval and DBSCRegistrationPath on the session Manager.
-func (s *Session) InitiateDBSCRegistration(w http.ResponseWriter, r *http.Request) {
+func (s *Session[T]) InitiateDBSCRegistration(w http.ResponseWriter, r *http.Request) {
 	s.ensureLoaded()
 	if s.aborted {
 		return
 	}
 
-	cfg, ok := r.Context().Value(dbscServeConfigKey{}).(dbscServeConfig)
+	cfg, ok := r.Context().Value(dbscServeConfigKey{}).(dbscServeConfig[T])
 	if !ok || cfg.RegistrationPath == "" || cfg.GenerateChallenge == nil {
 		http.Error(w, "DBSC registration not configured on session manager", http.StatusInternalServerError)
 		return

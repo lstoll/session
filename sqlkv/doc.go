@@ -34,11 +34,14 @@
 //		log.Fatal(err)
 //	}
 //
-//	// Configure the session manager to use this KV store
-//	manager := session.NewManager(&session.ManagerOpts{
-//		StorageMode: session.StorageModeKV,
-//		KV:          kv,
-//	})
+//	// Configure a typed session manager to use this KV store
+//	type SessionData struct {
+//		UserID string
+//	}
+//	manager, err := session.NewKVManager[SessionData](kv, nil)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
 //
 // Garbage Collection:
 //

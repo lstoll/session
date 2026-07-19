@@ -18,6 +18,10 @@ import (
 	"lds.li/session"
 )
 
+type sessionData struct {
+	User string
+}
+
 func chromeDBSCAllocatorOptions(userDataDir string) []chromedp.ExecAllocatorOption {
 	co := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("enable-features", "DeviceBoundSessions,DeviceBoundSessionsDevTools,EnableBoundSessionCredentialsSoftwareKeysForManualTesting"),
@@ -71,13 +75,15 @@ func startDBSCTestServer(t *testing.T) string {
 
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
 		sess := mgr.FromContext(r.Context())
-		sess.Set("user", "alice")
+		data := sess.Get()
+		data.User = "alice"
+		sess.Set(data)
 		http.Redirect(w, r, "/protected", http.StatusSeeOther)
 	})
 
 	mux.HandleFunc("/protected", func(w http.ResponseWriter, r *http.Request) {
 		sess := mgr.FromContext(r.Context())
-		if sess.Get("user") != "alice" {
+		if sess.Get().User != "alice" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -117,24 +123,22 @@ func startDBSCTestServer(t *testing.T) string {
 	return baseURL
 }
 
-func newDBSCTestManager(t *testing.T, origin string) *session.Manager {
+func newDBSCTestManager(t *testing.T, origin string) *session.Manager[sessionData] {
 	t.Helper()
 	kv := session.NewMemoryKV()
-	opts := &session.KVManagerOpts{
-		ManagerOpts: session.ManagerOpts{
-			IdleTimeout:          1 * time.Hour,
-			DBSCRefreshInterval:  5 * time.Minute,
-			DBSCRegistrationPath: "/register",
-			DBSCRefreshPath:      "/dbsc/refresh",
-			DBSCOrigin:           origin,
-			CookieOpts: &session.SessionCookieOpts{
-				Name:    "__Host-session-id",
-				Path:    "/",
-				Persist: true,
-			},
+	opts := &session.KVManagerOpts[sessionData]{
+		IdleTimeout:          1 * time.Hour,
+		DBSCRefreshInterval:  5 * time.Minute,
+		DBSCRegistrationPath: "/register",
+		DBSCRefreshPath:      "/dbsc/refresh",
+		DBSCOrigin:           origin,
+		CookieOpts: &session.SessionCookieOpts{
+			Name:    "__Host-session-id",
+			Path:    "/",
+			Persist: true,
 		},
 	}
-	mgr, err := session.NewKVManager(kv, opts)
+	mgr, err := session.NewKVManager[sessionData](kv, opts)
 	if err != nil {
 		t.Fatalf("failed to create kv manager: %v", err)
 	}
@@ -200,20 +204,21 @@ func runDBSCChromeFlow(t *testing.T, baseURL string) {
 // stack emits DBSC registration headers over HTTPS (no Chrome DBSC required).
 func TestLoginResponseIncludesSecureSessionRegistration(t *testing.T) {
 	kv := session.NewMemoryKV()
-	mgr, err := session.NewKVManager(kv, &session.KVManagerOpts{
-		ManagerOpts: session.ManagerOpts{
-			IdleTimeout:          time.Hour,
-			DBSCRefreshInterval:  5 * time.Minute,
-			DBSCRegistrationPath: "/register",
-			DBSCOrigin:           "https://example.test",
-		},
+	mgr, err := session.NewKVManager[sessionData](kv, &session.KVManagerOpts[sessionData]{
+		IdleTimeout:          time.Hour,
+		DBSCRefreshInterval:  5 * time.Minute,
+		DBSCRegistrationPath: "/register",
+		DBSCOrigin:           "https://example.test",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
-		mgr.FromContext(r.Context()).Set("u", 1)
+		sess := mgr.FromContext(r.Context())
+		data := sess.Get()
+		data.User = "alice"
+		sess.Set(data)
 		w.Write([]byte("ok"))
 	})
 	ts := httptest.NewTLSServer(mgr.Wrap(mux))

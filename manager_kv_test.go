@@ -92,14 +92,14 @@ func (c *countingKV) setCount() int {
 
 func TestKVManager_LazyLoad_skipsKVWithoutSessionAccess(t *testing.T) {
 	ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
-	mgr, err := NewKVManager(ckv, nil)
+	mgr, err := NewKVManager[testSessionData](ckv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Seed a session directly in KV.
 	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mgr.FromContext(r.Context()).Set("user", "alice")
+		setTestUser(mgr.FromContext(r.Context()), "alice")
 		w.WriteHeader(http.StatusOK)
 	}))
 	rrSeed := httptest.NewRecorder()
@@ -135,20 +135,20 @@ func TestKVManager_LazyLoad_skipsKVWithoutSessionAccess(t *testing.T) {
 
 func TestKVManager_LazyLoad_loadsOnSessionAccess(t *testing.T) {
 	ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
-	mgr, err := NewKVManager(ckv, nil)
+	mgr, err := NewKVManager[testSessionData](ckv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mgr.FromContext(r.Context()).Set("user", "alice")
+		setTestUser(mgr.FromContext(r.Context()), "alice")
 	}))
 	rrSeed := httptest.NewRecorder()
 	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
 	cookies := rrSeed.Result().Cookies()
 
 	app := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if mgr.FromContext(r.Context()).Get("user") != "alice" {
+		if mgr.FromContext(r.Context()).Get().User != "alice" {
 			http.Error(w, "missing user", http.StatusUnauthorized)
 			return
 		}
@@ -170,13 +170,13 @@ func TestKVManager_LazyLoad_loadsOnSessionAccess(t *testing.T) {
 
 func TestKVManager_EagerLoad_hitsKVOnEveryRequest(t *testing.T) {
 	ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
-	mgr, err := NewKVManager(ckv, &KVManagerOpts{EagerLoad: true})
+	mgr, err := NewKVManager[testSessionData](ckv, &KVManagerOpts[testSessionData]{EagerLoad: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mgr.FromContext(r.Context()).Set("user", "alice")
+		setTestUser(mgr.FromContext(r.Context()), "alice")
 	}))
 	rrSeed := httptest.NewRecorder()
 	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
@@ -200,13 +200,14 @@ func TestKVManager_LoadErrorAbortsRequest(t *testing.T) {
 	for _, eager := range []bool{false, true} {
 		t.Run(map[bool]string{false: "lazy", true: "eager"}[eager], func(t *testing.T) {
 			var handled error
-			mgr, err := NewKVManager(failingGetKV{}, &KVManagerOpts{
+			mgr, err := NewKVManager[testSessionData](failingGetKV{}, &KVManagerOpts[testSessionData]{
 				EagerLoad: eager,
-				ManagerOpts: ManagerOpts{ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+				ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 					handled = err
 					http.Error(w, "unavailable", http.StatusServiceUnavailable)
-				}},
+				},
 			})
+
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -214,7 +215,7 @@ func TestKVManager_LoadErrorAbortsRequest(t *testing.T) {
 			called := false
 			handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				called = true
-				mgr.FromContext(r.Context()).Get("user")
+				mgr.FromContext(r.Context()).Get()
 			}))
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req.AddCookie(&http.Cookie{Name: mgr.cookieSettings.Name, Value: "AAAAAAAAAAAAAAAAAAAAAAAAAA"})
@@ -239,9 +240,9 @@ func TestKVManager_LoadErrorAbortsRequest(t *testing.T) {
 
 func TestKVManager_SessionIDMAC_roundTrip(t *testing.T) {
 	kv := &memoryKV{contents: make(map[string]kvItem)}
-	mgr, err := NewKVManager(kv, &KVManagerOpts{
-		SessionIDMAC: newTestMAC(t),
-	})
+	mgr, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{
+		SessionIDMAC: newTestMAC(t)})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,10 +251,10 @@ func TestKVManager_SessionIDMAC_roundTrip(t *testing.T) {
 		sess := mgr.FromContext(r.Context())
 		switch r.URL.Path {
 		case "/set":
-			sess.Set("user", "alice")
+			setTestUser(sess, "alice")
 			w.WriteHeader(http.StatusOK)
 		case "/get":
-			if sess.Get("user") != "alice" {
+			if sess.Get().User != "alice" {
 				http.Error(w, "missing user", http.StatusUnauthorized)
 				return
 			}
@@ -290,9 +291,9 @@ func TestKVManager_SessionIDMAC_roundTrip(t *testing.T) {
 
 func TestKVManager_SessionIDMAC_rejectsForgedCookie(t *testing.T) {
 	kv := &memoryKV{contents: make(map[string]kvItem)}
-	mgr, err := NewKVManager(kv, &KVManagerOpts{
-		SessionIDMAC: newTestMAC(t),
-	})
+	mgr, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{
+		SessionIDMAC: newTestMAC(t)})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +302,7 @@ func TestKVManager_SessionIDMAC_rejectsForgedCookie(t *testing.T) {
 	forgedKey := managerHashSessionID(forgedID)
 
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mgr.FromContext(r.Context()).Set("k", "v")
+		setTestUser(mgr.FromContext(r.Context()), "v")
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -325,9 +326,9 @@ func TestKVManager_SessionIDMAC_rejectsForgedCookie(t *testing.T) {
 
 func TestKVManager_SessionIDMAC_skipsKVGetOnInvalidCookie(t *testing.T) {
 	ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
-	mgr, err := NewKVManager(ckv, &KVManagerOpts{
-		SessionIDMAC: newTestMAC(t),
-	})
+	mgr, err := NewKVManager[testSessionData](ckv, &KVManagerOpts[testSessionData]{
+		SessionIDMAC: newTestMAC(t)})
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,14 +349,14 @@ func TestKVManager_SessionIDMAC_skipsKVGetOnInvalidCookie(t *testing.T) {
 
 func TestKVManager_withoutSessionIDMAC_replacesUnknownBareCookie(t *testing.T) {
 	kv := &memoryKV{contents: make(map[string]kvItem)}
-	mgr, err := NewKVManager(kv, nil)
+	mgr, err := NewKVManager[testSessionData](kv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	bareID := "AAAAAAAAAAAAAAAAAAAAAAAAAA"
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mgr.FromContext(r.Context()).Set("k", "v")
+		setTestUser(mgr.FromContext(r.Context()), "v")
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -378,13 +379,13 @@ func TestKVManager_withoutSessionIDMAC_replacesUnknownBareCookie(t *testing.T) {
 
 func TestKVManager_withoutSessionIDMAC_skipsOversizedIDLookup(t *testing.T) {
 	ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
-	mgr, err := NewKVManager(ckv, nil)
+	mgr, err := NewKVManager[testSessionData](ckv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mgr.FromContext(r.Context()).Set("k", "v")
+		setTestUser(mgr.FromContext(r.Context()), "v")
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: mgr.cookieSettings.Name, Value: strings.Repeat("x", 129)})
@@ -398,7 +399,7 @@ func TestKVManager_withoutSessionIDMAC_skipsOversizedIDLookup(t *testing.T) {
 func TestSession_IsNew(t *testing.T) {
 	t.Run("lazy until loaded", func(t *testing.T) {
 		ckv := &countingKV{kv: &memoryKV{contents: make(map[string]kvItem)}}
-		mgr, err := NewKVManager(ckv, nil)
+		mgr, err := NewKVManager[testSessionData](ckv, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -409,7 +410,7 @@ func TestSession_IsNew(t *testing.T) {
 			if !sess.IsNew() {
 				t.Fatal("first visit should be new")
 			}
-			sess.Set("user", "alice")
+			setTestUser(sess, "alice")
 		}))
 		rrSeed := httptest.NewRecorder()
 		seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
@@ -429,8 +430,8 @@ func TestSession_IsNew(t *testing.T) {
 
 		load := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			sess := mgr.FromContext(r.Context())
-			if sess.Get("user") != "alice" {
-				t.Fatalf("got %v", sess.Get("user"))
+			if sess.Get().User != "alice" {
+				t.Fatalf("got %v", sess.Get().User)
 			}
 			if sess.IsNew() {
 				t.Fatal("returning visit should not be new after load")
@@ -446,14 +447,14 @@ func TestSession_IsNew(t *testing.T) {
 
 	t.Run("eager returning visit", func(t *testing.T) {
 		kv := &memoryKV{contents: make(map[string]kvItem)}
-		mgr, err := NewKVManager(kv, &KVManagerOpts{EagerLoad: true})
+		mgr, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{EagerLoad: true})
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		var cookies []*http.Cookie
 		seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mgr.FromContext(r.Context()).Set("k", "v")
+			setTestUser(mgr.FromContext(r.Context()), "v")
 		}))
 		rrSeed := httptest.NewRecorder()
 		seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -474,14 +475,14 @@ func TestSession_IsNew(t *testing.T) {
 
 	t.Run("reset", func(t *testing.T) {
 		kv := &memoryKV{contents: make(map[string]kvItem)}
-		mgr, err := NewKVManager(kv, &KVManagerOpts{EagerLoad: true})
+		mgr, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{EagerLoad: true})
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		var cookies []*http.Cookie
 		seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mgr.FromContext(r.Context()).Set("k", "v")
+			setTestUser(mgr.FromContext(r.Context()), "v")
 		}))
 		rrSeed := httptest.NewRecorder()
 		seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/", nil))

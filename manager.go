@@ -11,88 +11,38 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/tink-crypto/tink-go/v2/tink"
 )
 
-var (
-	managerRegistryMu  sync.Mutex
-	registeredManagers []*Manager
-)
-
-func registerManager(m *Manager) {
-	managerRegistryMu.Lock()
-	defer managerRegistryMu.Unlock()
-	for _, existing := range registeredManagers {
-		if existing == m {
-			return
-		}
-	}
-	registeredManagers = append(registeredManagers, m)
-}
-
-func singletonManager() (*Manager, bool) {
-	managerRegistryMu.Lock()
-	defer managerRegistryMu.Unlock()
-	switch len(registeredManagers) {
-	case 0:
-		return nil, false
-	case 1:
-		return registeredManagers[0], true
-	default:
-		return nil, false
-	}
-}
-
-// FromContext returns the Session installed by the sole registered Manager.
-// It panics if multiple Managers are registered, or if no session is in context.
-// When no Manager is registered, it falls back to sessions attached via TestContext.
-func FromContext(ctx context.Context) *Session {
-	m, ok := singletonManager()
-	if ok {
-		return m.FromContext(ctx)
-	}
-	managerRegistryMu.Lock()
-	n := len(registeredManagers)
-	managerRegistryMu.Unlock()
-	if n > 1 {
-		panic("session: multiple Managers registered; use Manager.FromContext")
-	}
-	if sess, ok := ctx.Value(testSessionContextKey{}).(*Session); ok {
-		return sess
-	}
-	panic("no session in context")
-}
-
 // FromContext returns the Session this Manager stored in ctx.
 // It panics if this Manager did not install a session in ctx.
-func (m *Manager) FromContext(ctx context.Context) *Session {
-	sess, ok := ctx.Value(sessionContextKey{manager: m}).(*Session)
+func (m *Manager[T]) FromContext(ctx context.Context) *Session[T] {
+	sess, ok := ctx.Value(sessionContextKey[T]{manager: m}).(*Session[T])
 	if !ok {
 		panic("no session in context for this Manager")
 	}
 	return sess
 }
 
-type sessionStore interface {
-	load(r *http.Request) (persistedSession, []byte, error)
-	save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, sess persistedSession) error
+type sessionStore[T any] interface {
+	load(r *http.Request) (persistedSession[T], []byte, error)
+	save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, sess persistedSession[T]) error
 	delete(w http.ResponseWriter, r *http.Request) error
 	touch(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error
 
-	generateChallenge(r *http.Request, sctx *Session, isRegister bool) (string, error)
-	verifyChallenge(r *http.Request, sctx *Session, challengeStr string, isRegister bool) error
-	consumeChallenge(r *http.Request, sctx *Session, challengeStr string) error
+	generateChallenge(r *http.Request, sctx *Session[T], isRegister bool) (string, error)
+	verifyChallenge(r *http.Request, sctx *Session[T], challengeStr string, isRegister bool) error
+	consumeChallenge(r *http.Request, sctx *Session[T], challengeStr string) error
 }
 
 // Manager handles both session data and storage.
-type Manager struct {
-	store               sessionStore
+type Manager[T any] struct {
+	store               sessionStore[T]
 	cookieSettings      SessionCookieOpts
-	codec               codec
-	opts                ManagerOpts
+	codec               codec[T]
+	opts                managerOpts[T]
 	compressionDisabled bool
 	lazyLoad            bool
 }
@@ -122,8 +72,36 @@ func (c *SessionCookieOpts) newCookie(exp time.Time) *http.Cookie {
 	return hc
 }
 
-// ManagerOpts configures the session manager
-type ManagerOpts struct {
+type managerOpts[T any] struct {
+	MaxLifetime  time.Duration
+	IdleTimeout  time.Duration
+	ErrorHandler func(http.ResponseWriter, *http.Request, error)
+	Onload       func(T) T
+	CookieOpts   *SessionCookieOpts
+
+	DBSCRefreshInterval  time.Duration
+	DBSCRegistrationPath string
+	DBSCRefreshPath      string
+	DBSCOrigin           string
+}
+
+// CookieManagerOpts configures options specifically for the cookie-based session manager
+type CookieManagerOpts[T any] struct {
+	MaxLifetime time.Duration
+	IdleTimeout time.Duration
+	// ErrorHandler handles failures that prevent the manager from safely loading
+	// or persisting session state. When nil, the manager logs the error and
+	// responds 500.
+	ErrorHandler func(http.ResponseWriter, *http.Request, error)
+	// Onload is called when a session is retrieved from storage.
+	Onload func(T) T
+	// Cookie settings.
+	CookieOpts         *SessionCookieOpts
+	DisableCompression bool
+}
+
+// KVManagerOpts configures options specifically for the KV-based session manager
+type KVManagerOpts[T any] struct {
 	MaxLifetime time.Duration
 	IdleTimeout time.Duration
 	// ErrorHandler handles failures that prevent the manager from safely loading
@@ -132,10 +110,18 @@ type ManagerOpts struct {
 	// accessor; the session and response are then aborted. When nil, the manager
 	// logs the error and responds 500.
 	ErrorHandler func(http.ResponseWriter, *http.Request, error)
-	// Onload is called when a session is retrieved from storage
-	Onload func(map[string]any) map[string]any
-	// Cookie settings
+	// Onload is called when a session is retrieved from storage.
+	Onload func(T) T
+	// Cookie settings.
 	CookieOpts *SessionCookieOpts
+
+	// SessionIDMAC authenticates the opaque session ID cookie value. When set,
+	// clients cannot forge session IDs to provoke arbitrary KV lookups or writes.
+	SessionIDMAC tink.MAC
+	// EagerLoad loads session data from the KV store on every request. The default
+	// is lazy loading: peek the session cookie up front and defer the KV Get until
+	// the handler (or a DBSC endpoint) actually needs session state.
+	EagerLoad bool
 
 	// DBSCRefreshInterval defines how often the device must prove possession
 	// of its private key. If 0, DBSC is disabled. Typical values are 5-15 minutes.
@@ -148,56 +134,25 @@ type ManagerOpts struct {
 	// saves session data (see Session.InitiateDBSCRegistration for edge cases).
 	DBSCRegistrationPath string
 	// DBSCRefreshPath is the refresh_url placed in session instructions. Defaults
-	// to "/dbsc/refresh" if empty. POSTs to this path are handled by the manager
-	// (proof verification, challenges, and JSON session instructions).
+	// to "/dbsc/refresh" if empty. POSTs to this path are handled by the manager.
 	DBSCRefreshPath string
 	// DBSCOrigin is the origin sent in DBSC session instructions (scope.origin),
 	// e.g. "https://example.com". Required when DBSCRefreshInterval is set.
 	DBSCOrigin string
 }
 
-// CookieManagerOpts configures options specifically for the cookie-based session manager
-type CookieManagerOpts struct {
-	ManagerOpts
-	DisableCompression bool
-}
-
-// KVManagerOpts configures options specifically for the KV-based session manager
-type KVManagerOpts struct {
-	ManagerOpts
-	// SessionIDMAC authenticates the opaque session ID cookie value. When set,
-	// clients cannot forge session IDs to provoke arbitrary KV lookups or writes.
-	SessionIDMAC tink.MAC
-	// EagerLoad loads session data from the KV store on every request. The default
-	// is lazy loading: peek the session cookie up front and defer the KV Get until
-	// the handler (or a DBSC endpoint) actually needs session state.
-	EagerLoad bool
-}
-
 // NewCookieManager creates a new Manager that stores session data in cookies
-func NewCookieManager(aead tink.AEAD, opts *CookieManagerOpts) (*Manager, error) {
-	m := &Manager{
-		opts: ManagerOpts{
-			IdleTimeout: DefaultIdleTimeout,
-		},
-		codec: &gobCodec{},
-	}
-
-	if opts != nil {
-		m.opts = opts.ManagerOpts
-		if m.opts.IdleTimeout == 0 && m.opts.MaxLifetime == 0 {
-			m.opts.IdleTimeout = DefaultIdleTimeout
-		}
-		m.compressionDisabled = opts.DisableCompression
+func NewCookieManager[T any](aead tink.AEAD, opts *CookieManagerOpts[T]) (*Manager[T], error) {
+	normalized, compressionDisabled := normalizeCookieManagerOpts(opts)
+	m := &Manager[T]{
+		opts:                normalized,
+		codec:               &gobCodec[T]{},
+		compressionDisabled: compressionDisabled,
 	}
 
 	if m.opts.IdleTimeout == 0 && m.opts.MaxLifetime == 0 {
 		return nil, errors.New("at least one of idle timeout or max lifetime must be specified")
 	}
-	if m.opts.DBSCRefreshInterval != 0 {
-		return nil, errors.New("DBSC requires a KV-backed session manager")
-	}
-
 	// Set cookie options
 	if m.opts.CookieOpts != nil {
 		m.cookieSettings = *m.opts.CookieOpts
@@ -208,32 +163,22 @@ func NewCookieManager(aead tink.AEAD, opts *CookieManagerOpts) (*Manager, error)
 		}
 	}
 
-	m.store = &cookieStore{
+	m.store = &cookieStore[T]{
 		aead:                aead,
 		codec:               m.codec,
 		compressionDisabled: m.compressionDisabled,
 		cookieSettings:      m.cookieSettings,
 	}
 
-	registerManager(m)
-
 	return m, nil
 }
 
 // NewKVManager creates a new Manager that stores session data in a KV store
-func NewKVManager(kv KV, opts *KVManagerOpts) (*Manager, error) {
-	m := &Manager{
-		opts: ManagerOpts{
-			IdleTimeout: DefaultIdleTimeout,
-		},
-		codec: &gobCodec{},
-	}
-
-	if opts != nil {
-		m.opts = opts.ManagerOpts
-		if m.opts.IdleTimeout == 0 && m.opts.MaxLifetime == 0 {
-			m.opts.IdleTimeout = DefaultIdleTimeout
-		}
+func NewKVManager[T any](kv KV, opts *KVManagerOpts[T]) (*Manager[T], error) {
+	normalized, sessionIDMAC, eagerLoad := normalizeKVManagerOpts(opts)
+	m := &Manager[T]{
+		opts:  normalized,
+		codec: &gobCodec[T]{},
 	}
 
 	if m.opts.IdleTimeout == 0 && m.opts.MaxLifetime == 0 {
@@ -253,36 +198,58 @@ func NewKVManager(kv KV, opts *KVManagerOpts) (*Manager, error) {
 		}
 	}
 
-	m.store = &kvStore{
+	m.store = &kvStore[T]{
 		m:              m,
 		kv:             kv,
 		codec:          m.codec,
 		cookieSettings: m.cookieSettings,
-		mac:            optsSessionIDMAC(opts),
+		mac:            sessionIDMAC,
 	}
 
-	m.lazyLoad = !optsEagerLoad(opts)
-
-	registerManager(m)
+	m.lazyLoad = !eagerLoad
 
 	return m, nil
 }
 
-func optsSessionIDMAC(opts *KVManagerOpts) tink.MAC {
+func normalizeCookieManagerOpts[T any](opts *CookieManagerOpts[T]) (managerOpts[T], bool) {
 	if opts == nil {
-		return nil
+		return managerOpts[T]{IdleTimeout: DefaultIdleTimeout}, false
 	}
-	return opts.SessionIDMAC
+	normalized := managerOpts[T]{
+		MaxLifetime:  opts.MaxLifetime,
+		IdleTimeout:  opts.IdleTimeout,
+		ErrorHandler: opts.ErrorHandler,
+		Onload:       opts.Onload,
+		CookieOpts:   opts.CookieOpts,
+	}
+	if normalized.IdleTimeout == 0 && normalized.MaxLifetime == 0 {
+		normalized.IdleTimeout = DefaultIdleTimeout
+	}
+	return normalized, opts.DisableCompression
 }
 
-func optsEagerLoad(opts *KVManagerOpts) bool {
+func normalizeKVManagerOpts[T any](opts *KVManagerOpts[T]) (managerOpts[T], tink.MAC, bool) {
 	if opts == nil {
-		return false
+		return managerOpts[T]{IdleTimeout: DefaultIdleTimeout}, nil, false
 	}
-	return opts.EagerLoad
+	normalized := managerOpts[T]{
+		MaxLifetime:          opts.MaxLifetime,
+		IdleTimeout:          opts.IdleTimeout,
+		ErrorHandler:         opts.ErrorHandler,
+		Onload:               opts.Onload,
+		CookieOpts:           opts.CookieOpts,
+		DBSCRefreshInterval:  opts.DBSCRefreshInterval,
+		DBSCRegistrationPath: opts.DBSCRegistrationPath,
+		DBSCRefreshPath:      opts.DBSCRefreshPath,
+		DBSCOrigin:           opts.DBSCOrigin,
+	}
+	if normalized.IdleTimeout == 0 && normalized.MaxLifetime == 0 {
+		normalized.IdleTimeout = DefaultIdleTimeout
+	}
+	return normalized, opts.SessionIDMAC, opts.EagerLoad
 }
 
-func validateDBSCOpts(opts ManagerOpts) error {
+func validateDBSCOpts[T any](opts managerOpts[T]) error {
 	if opts.DBSCRefreshInterval == 0 {
 		return nil
 	}
@@ -303,18 +270,17 @@ const (
 var managerCookieValueEncoding = base64.RawURLEncoding
 
 // Wrap creates middleware that handles session management for each request
-func (m *Manager) Wrap(next http.Handler) http.Handler {
+func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := r.Context().Value(sessionContextKey{manager: m}).(*Session); ok {
+		if _, ok := r.Context().Value(sessionContextKey[T]{manager: m}).(*Session[T]); ok {
 			panic("session middleware wrapped more than once for this Manager")
 		}
 
 		// Create new session context with initial metadata
-		sctx := &Session{
+		sctx := &Session[T]{
 			mgr:   m,
 			isNew: true,
-			sessdata: persistedSession{
-				Data:      make(map[string]any),
+			sessdata: persistedSession[T]{
 				CreatedAt: time.Now(),
 			},
 		}
@@ -343,7 +309,7 @@ func (m *Manager) Wrap(next http.Handler) http.Handler {
 
 		dbscEnabled := m.opts.DBSCRefreshInterval > 0
 
-		hw := &hookRW{
+		hw := &hookRW[T]{
 			ResponseWriter: w,
 			hook:           m.saveHook(r, sctx),
 			sctx:           sctx,
@@ -375,9 +341,9 @@ func (m *Manager) Wrap(next http.Handler) http.Handler {
 			}
 		}
 
-		ctx := context.WithValue(r.Context(), sessionContextKey{manager: m}, sctx)
+		ctx := context.WithValue(r.Context(), sessionContextKey[T]{manager: m}, sctx)
 		if dbscEnabled {
-			ctx = context.WithValue(ctx, dbscServeConfigKey{}, dbscServeConfig{
+			ctx = context.WithValue(ctx, dbscServeConfigKey{}, dbscServeConfig[T]{
 				RegistrationPath:  m.dbscRegistrationPath(),
 				GenerateChallenge: m.store.generateChallenge,
 			})
@@ -397,11 +363,11 @@ func (m *Manager) Wrap(next http.Handler) http.Handler {
 // Storage methods
 
 // loadSession retrieves session data from the appropriate storage
-func (m *Manager) loadSession(r *http.Request) (persistedSession, []byte, error) {
+func (m *Manager[T]) loadSession(r *http.Request) (persistedSession[T], []byte, error) {
 	return m.store.load(r)
 }
 
-func (m *Manager) saveHook(r *http.Request, sctx *Session) func(w http.ResponseWriter) bool {
+func (m *Manager[T]) saveHook(r *http.Request, sctx *Session[T]) func(w http.ResponseWriter) bool {
 	return func(w http.ResponseWriter) bool {
 		// Update the metadata timestamp
 		sctx.sessdata.UpdatedAt = time.Now()
@@ -438,7 +404,7 @@ func (m *Manager) saveHook(r *http.Request, sctx *Session) func(w http.ResponseW
 }
 
 // saveSession saves the session data to the appropriate storage
-func (m *Manager) saveSession(w http.ResponseWriter, r *http.Request, sctx *Session) error {
+func (m *Manager[T]) saveSession(w http.ResponseWriter, r *http.Request, sctx *Session[T]) error {
 	// If device-bound and DBSCCurrentCookieID is empty, generate one
 	if len(sctx.sessdata.DBSCPublicJWKS) > 0 && sctx.sessdata.DBSCCurrentCookieID == "" {
 		sctx.sessdata.DBSCCurrentCookieID = rand.Text()
@@ -454,7 +420,7 @@ func (m *Manager) saveSession(w http.ResponseWriter, r *http.Request, sctx *Sess
 }
 
 // deleteSession deletes the session from the appropriate storage
-func (m *Manager) deleteSession(w http.ResponseWriter, r *http.Request, sctx *Session) error {
+func (m *Manager[T]) deleteSession(w http.ResponseWriter, r *http.Request, sctx *Session[T]) error {
 	// Delete cookie regardless of storage mode
 	dc := m.cookieSettings.newCookie(time.Time{})
 	dc.MaxAge = -1
@@ -468,12 +434,12 @@ func (m *Manager) deleteSession(w http.ResponseWriter, r *http.Request, sctx *Se
 }
 
 // touchSession updates the session expiry without modifying content
-func (m *Manager) touchSession(w http.ResponseWriter, r *http.Request, sctx *Session) error {
+func (m *Manager[T]) touchSession(w http.ResponseWriter, r *http.Request, sctx *Session[T]) error {
 	expiresAt := m.calculateExpiry(sctx.sessdata)
 	return m.store.touch(w, r, expiresAt, sctx.datab)
 }
 
-func (m *Manager) calculateExpiry(sessdata persistedSession) time.Time {
+func (m *Manager[T]) calculateExpiry(sessdata persistedSession[T]) time.Time {
 	var invalidTimes []time.Time
 
 	if m.opts.MaxLifetime != 0 {
@@ -506,18 +472,18 @@ func (m *Manager) calculateExpiry(sessdata persistedSession) time.Time {
 }
 
 // Helper functions for tracking KV-mode session ID in context
-type managerSessionIDCtxKey struct{ manager *Manager }
+type managerSessionIDCtxKey[T any] struct{ manager *Manager[T] }
 
-func getManagerSessionIDFromContext(r *http.Request, m *Manager) string {
-	val := r.Context().Value(managerSessionIDCtxKey{manager: m})
+func getManagerSessionIDFromContext[T any](r *http.Request, m *Manager[T]) string {
+	val := r.Context().Value(managerSessionIDCtxKey[T]{manager: m})
 	if val == nil {
 		return ""
 	}
 	return val.(string)
 }
 
-func setManagerSessionIDInContext(r *http.Request, m *Manager, id string) {
-	*r = *r.WithContext(context.WithValue(r.Context(), managerSessionIDCtxKey{manager: m}, id))
+func setManagerSessionIDInContext[T any](r *http.Request, m *Manager[T], id string) {
+	*r = *r.WithContext(context.WithValue(r.Context(), managerSessionIDCtxKey[T]{manager: m}, id))
 }
 
 // Cookie handling helper
@@ -545,20 +511,15 @@ func managerRemoveCookieByName(w http.ResponseWriter, cookieName string) {
 
 // maybeAttachDBSCRegistrationOffer sets Secure-Session-Registration when the
 // session is being persisted, DBSC is configured, the session is not yet device
-// bound, and there is no pending registration challenge. We only do this when
-// the session carries at least one application data key so anonymous hits that
-// never call Set do not trigger registration.
-func (m *Manager) maybeAttachDBSCRegistrationOffer(w http.ResponseWriter, r *http.Request, sctx *Session) {
+// bound, and there is no pending registration challenge. This is only called
+// for a dirty session, so anonymous read-only hits do not trigger registration.
+func (m *Manager[T]) maybeAttachDBSCRegistrationOffer(w http.ResponseWriter, r *http.Request, sctx *Session[T]) {
 	if m.opts.DBSCRefreshInterval == 0 {
 		slog.DebugContext(r.Context(), "dbsc registration offer skipped", "reason", "dbsc_not_configured")
 		return
 	}
 	if len(sctx.sessdata.DBSCPublicJWKS) != 0 {
 		slog.DebugContext(r.Context(), "dbsc registration offer skipped", "reason", "already_device_bound")
-		return
-	}
-	if len(sctx.sessdata.Data) == 0 {
-		slog.DebugContext(r.Context(), "dbsc registration offer skipped", "reason", "no_session_data_keys")
 		return
 	}
 	if sctx.sessdata.DBSCRegistrationChallenge != "" {
@@ -578,11 +539,11 @@ func (m *Manager) maybeAttachDBSCRegistrationOffer(w http.ResponseWriter, r *htt
 		"challenge_len", len(challenge))
 }
 
-func (m *Manager) dbscBoundCookieName() string {
+func (m *Manager[T]) dbscBoundCookieName() string {
 	return m.cookieSettings.Name + "-bound"
 }
 
-func (m *Manager) setDBSCBoundCookie(w http.ResponseWriter, sctx *Session) {
+func (m *Manager[T]) setDBSCBoundCookie(w http.ResponseWriter, sctx *Session[T]) {
 	if len(sctx.sessdata.DBSCPublicJWKS) == 0 {
 		return
 	}
@@ -609,7 +570,7 @@ func (m *Manager) setDBSCBoundCookie(w http.ResponseWriter, sctx *Session) {
 	http.SetCookie(w, hc)
 }
 
-func (m *Manager) deleteDBSCBoundCookie(w http.ResponseWriter) {
+func (m *Manager[T]) deleteDBSCBoundCookie(w http.ResponseWriter) {
 	dc := &http.Cookie{
 		Name:     m.dbscBoundCookieName(),
 		Path:     m.cookieSettings.Path,
@@ -622,21 +583,21 @@ func (m *Manager) deleteDBSCBoundCookie(w http.ResponseWriter) {
 	http.SetCookie(w, dc)
 }
 
-func (m *Manager) dbscRefreshPath() string {
+func (m *Manager[T]) dbscRefreshPath() string {
 	if m.opts.DBSCRefreshPath != "" {
 		return m.opts.DBSCRefreshPath
 	}
 	return "/dbsc/refresh"
 }
 
-func (m *Manager) dbscRegistrationPath() string {
+func (m *Manager[T]) dbscRegistrationPath() string {
 	if m.opts.DBSCRegistrationPath != "" {
 		return m.opts.DBSCRegistrationPath
 	}
 	return "/dbsc/register"
 }
 
-func (m *Manager) dbscCookieCredentialAttributes() string {
+func (m *Manager[T]) dbscCookieCredentialAttributes() string {
 	var b strings.Builder
 	if p := m.cookieSettings.Path; p != "" {
 		b.WriteString("Path=")
@@ -652,7 +613,7 @@ func (m *Manager) dbscCookieCredentialAttributes() string {
 }
 
 // dbscWriteInstructions sets headers, writes the JSON body, and logs warnings.
-func (m *Manager) dbscWriteInstructions(w http.ResponseWriter, r *http.Request, body []byte) {
+func (m *Manager[T]) dbscWriteInstructions(w http.ResponseWriter, r *http.Request, body []byte) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(body); err != nil {
@@ -660,7 +621,7 @@ func (m *Manager) dbscWriteInstructions(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-func (m *Manager) dbscRegistrationInstructions(sessionID string) ([]byte, error) {
+func (m *Manager[T]) dbscRegistrationInstructions(sessionID string) ([]byte, error) {
 	instructions := map[string]any{
 		"session_identifier": sessionID,
 		"refresh_url":        m.dbscRefreshPath(),
@@ -679,7 +640,7 @@ func (m *Manager) dbscRegistrationInstructions(sessionID string) ([]byte, error)
 }
 
 // tryHandleDBSCRegistration handles POST DBSC registration proofs before the wrapped handler runs.
-func (m *Manager) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Request, sctx *Session) bool {
+func (m *Manager[T]) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
 	if m.opts.DBSCRefreshInterval == 0 {
 		return false
 	}
@@ -751,7 +712,7 @@ func (m *Manager) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Reque
 }
 
 // tryHandleDBSCRefresh handles POST DBSC refresh proofs per §5 / §8.8 of the spec.
-func (m *Manager) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request, sctx *Session) bool {
+func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
 	if m.opts.DBSCRefreshInterval == 0 {
 		return false
 	}
@@ -824,7 +785,7 @@ func (m *Manager) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request, s
 	return true
 }
 
-func (m *Manager) handleErr(w http.ResponseWriter, r *http.Request, err error) {
+func (m *Manager[T]) handleErr(w http.ResponseWriter, r *http.Request, err error) {
 	if m.opts.ErrorHandler != nil {
 		m.opts.ErrorHandler(w, r, err)
 		return
@@ -833,7 +794,7 @@ func (m *Manager) handleErr(w http.ResponseWriter, r *http.Request, err error) {
 	http.Error(w, "Internal Error", http.StatusInternalServerError)
 }
 
-func (m *Manager) dbscIssueInBandChallenge(w http.ResponseWriter, r *http.Request, sctx *Session) {
+func (m *Manager[T]) dbscIssueInBandChallenge(w http.ResponseWriter, r *http.Request, sctx *Session[T]) {
 	nonce, err := m.store.generateChallenge(r, sctx, false)
 	if err != nil {
 		m.handleErr(w, r, err)
@@ -850,7 +811,7 @@ func (m *Manager) dbscIssueInBandChallenge(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusForbidden)
 }
 
-func (m *Manager) dbscIssueRefreshChallenge(w http.ResponseWriter, r *http.Request, sctx *Session) bool {
+func (m *Manager[T]) dbscIssueRefreshChallenge(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
 	nonce, err := m.store.generateChallenge(r, sctx, false)
 	if err != nil {
 		m.handleErr(w, r, err)

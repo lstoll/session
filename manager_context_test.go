@@ -7,26 +7,16 @@ import (
 	"testing"
 )
 
-func resetManagerRegistryForTest(t *testing.T) {
-	t.Helper()
-	managerRegistryMu.Lock()
-	registeredManagers = nil
-	managerRegistryMu.Unlock()
-}
-
-func TestManagerContext_singletonFromContext(t *testing.T) {
-	resetManagerRegistryForTest(t)
-
+func TestManagerContext(t *testing.T) {
 	kv := NewMemoryKV()
-	mgr, err := NewKVManager(kv, nil)
+	mgr, err := NewKVManager[testSessionData](kv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sess := FromContext(r.Context())
-		if sess != mgr.FromContext(r.Context()) {
-			t.Fatal("package and Manager FromContext disagree")
+		if mgr.FromContext(r.Context()) == nil {
+			t.Fatal("manager did not find its session")
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -38,52 +28,13 @@ func TestManagerContext_singletonFromContext(t *testing.T) {
 	}
 }
 
-func TestManagerContext_multipleManagersPanic(t *testing.T) {
-	resetManagerRegistryForTest(t)
-
-	kv := NewMemoryKV()
-	mgr1, err := NewKVManager(kv, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mgr2, err := NewKVManager(NewMemoryKV(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	handler := mgr1.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("expected panic from package FromContext with multiple Managers")
-			}
-		}()
-		FromContext(r.Context())
-	}))
-
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
-
-	// mgr2 can still read only its own sessions.
-	handler2 := mgr2.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mgr2.FromContext(r.Context()).Set("k", "v")
-		w.WriteHeader(http.StatusOK)
-	}))
-	rr2 := httptest.NewRecorder()
-	handler2.ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "/", nil))
-	if rr2.Code != http.StatusOK {
-		t.Fatalf("mgr2 handler: got %v", rr2.Code)
-	}
-}
-
 func TestManagerContext_wrongManagerReturnsFalse(t *testing.T) {
-	resetManagerRegistryForTest(t)
-
 	kv := NewMemoryKV()
-	mgr1, err := NewKVManager(kv, nil)
+	mgr1, err := NewKVManager[testSessionData](kv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mgr2, err := NewKVManager(NewMemoryKV(), nil)
+	mgr2, err := NewKVManager[testSessionData](NewMemoryKV(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,15 +59,13 @@ func TestManagerContext_wrongManagerReturnsFalse(t *testing.T) {
 }
 
 func TestTestContext_fromContextFallback(t *testing.T) {
-	resetManagerRegistryForTest(t)
-
-	ctx, _ := TestContext(context.Background(), &Session{
-		sessdata: persistedSession{
-			Data: map[string]any{"x": 1},
-		},
-	})
-	sess := FromContext(ctx)
-	if sess.Get("x") != 1 {
-		t.Fatalf("got %v", sess.Get("x"))
+	mgr, err := NewKVManager[testSessionData](NewMemoryKV(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, _ := mgr.TestContext(context.Background(), testSessionData{Number: 1})
+	sess := mgr.FromContext(ctx)
+	if sess.Get().Number != 1 {
+		t.Fatalf("got %v", sess.Get().Number)
 	}
 }

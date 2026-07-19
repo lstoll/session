@@ -11,20 +11,20 @@ import (
 	"github.com/tink-crypto/tink-go/v2/tink"
 )
 
-type cookieStore struct {
+type cookieStore[T any] struct {
 	aead                tink.AEAD
-	codec               codec
+	codec               codec[T]
 	compressionDisabled bool
 	cookieSettings      SessionCookieOpts
 }
 
-func (s *cookieStore) load(r *http.Request) (persistedSession, []byte, error) {
+func (s *cookieStore[T]) load(r *http.Request) (persistedSession[T], []byte, error) {
 	cookie, err := r.Cookie(s.cookieSettings.Name)
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
-			return persistedSession{}, nil, nil
+			return persistedSession[T]{}, nil, nil
 		}
-		return persistedSession{}, nil, fmt.Errorf("getting cookie %s: %w", s.cookieSettings.Name, err)
+		return persistedSession[T]{}, nil, fmt.Errorf("getting cookie %s: %w", s.cookieSettings.Name, err)
 	}
 
 	cookieValue := cookie.Value
@@ -32,7 +32,7 @@ func (s *cookieStore) load(r *http.Request) (persistedSession, []byte, error) {
 	// Split and validate format: magic.encodedData
 	sp := strings.SplitN(cookieValue, ".", 2)
 	if len(sp) != 2 {
-		return persistedSession{}, nil, nil
+		return persistedSession[T]{}, nil, nil
 	}
 
 	magic := sp[0]
@@ -41,18 +41,18 @@ func (s *cookieStore) load(r *http.Request) (persistedSession, []byte, error) {
 	// Decode
 	decodedData, err := managerCookieValueEncoding.DecodeString(encodedData)
 	if err != nil {
-		return persistedSession{}, nil, nil
+		return persistedSession[T]{}, nil, nil
 	}
 
 	// Validate magic
 	if magic != managerCompressedCookieMagic && magic != managerCookieMagic {
-		return persistedSession{}, nil, nil
+		return persistedSession[T]{}, nil, nil
 	}
 
 	// Decrypt using AEAD with domain separated AD
 	decryptedData, err := s.aead.Decrypt(decodedData, []byte(s.cookieSettings.Name))
 	if err != nil {
-		return persistedSession{}, nil, nil
+		return persistedSession[T]{}, nil, nil
 	}
 
 	// Decompress if needed
@@ -62,7 +62,7 @@ func (s *cookieStore) load(r *http.Request) (persistedSession, []byte, error) {
 		defer putDecompressor(cr)
 		b, err := cr.Decompress(decryptedData)
 		if err != nil {
-			return persistedSession{}, nil, fmt.Errorf("decompressing cookie: %w", err)
+			return persistedSession[T]{}, nil, fmt.Errorf("decompressing cookie: %w", err)
 		}
 		rawData = b
 	} else {
@@ -71,23 +71,23 @@ func (s *cookieStore) load(r *http.Request) (persistedSession, []byte, error) {
 
 	// Check expiry
 	if len(rawData) < 8 {
-		return persistedSession{}, nil, errors.New("decrypted data too short")
+		return persistedSession[T]{}, nil, errors.New("decrypted data too short")
 	}
 	expiresAt := time.Unix(int64(binary.LittleEndian.Uint64(rawData[:8])), 0)
 	if expiresAt.Before(time.Now()) {
-		return persistedSession{}, nil, nil
+		return persistedSession[T]{}, nil, nil
 	}
 
 	// Decode using the codec
 	sess, err := s.codec.Decode(rawData[8:])
 	if err != nil {
-		return persistedSession{}, nil, fmt.Errorf("decoding session: %w", err)
+		return persistedSession[T]{}, nil, fmt.Errorf("decoding session: %w", err)
 	}
 
 	return sess, rawData[8:], nil
 }
 
-func (s *cookieStore) save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, sess persistedSession) error {
+func (s *cookieStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, sess persistedSession[T]) error {
 	// Encode using the codec
 	data, err := s.codec.Encode(sess)
 	if err != nil {
@@ -134,11 +134,11 @@ func (s *cookieStore) save(w http.ResponseWriter, r *http.Request, expiresAt tim
 	return nil
 }
 
-func (s *cookieStore) delete(w http.ResponseWriter, r *http.Request) error {
+func (s *cookieStore[T]) delete(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (s *cookieStore) touch(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
+func (s *cookieStore[T]) touch(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
 	// Encrypt data with AEAD
 	b := make([]byte, 8)
 	binary.LittleEndian.PutUint64(b, uint64(expiresAt.Unix()))
@@ -179,14 +179,14 @@ func (s *cookieStore) touch(w http.ResponseWriter, r *http.Request, expiresAt ti
 	return nil
 }
 
-func (s *cookieStore) generateChallenge(r *http.Request, sctx *Session, isRegister bool) (string, error) {
+func (s *cookieStore[T]) generateChallenge(r *http.Request, sctx *Session[T], isRegister bool) (string, error) {
 	return "", errors.New("DBSC requires a KV-backed session manager")
 }
 
-func (s *cookieStore) verifyChallenge(r *http.Request, sctx *Session, challengeStr string, isRegister bool) error {
+func (s *cookieStore[T]) verifyChallenge(r *http.Request, sctx *Session[T], challengeStr string, isRegister bool) error {
 	return errors.New("DBSC requires a KV-backed session manager")
 }
 
-func (s *cookieStore) consumeChallenge(r *http.Request, sctx *Session, challengeStr string) error {
+func (s *cookieStore[T]) consumeChallenge(r *http.Request, sctx *Session[T], challengeStr string) error {
 	return errors.New("DBSC requires a KV-backed session manager")
 }

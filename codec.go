@@ -7,24 +7,16 @@ import (
 	"time"
 )
 
-type codec interface {
-	// Encode serializes the session data map
-	Encode(sd persistedSession) ([]byte, error)
+type codec[T any] interface {
+	// Encode serializes the session data.
+	Encode(sd persistedSession[T]) ([]byte, error)
 
-	// Decode deserializes the session data into a map
-	Decode(data []byte) (persistedSession, error)
+	// Decode deserializes the session data.
+	Decode(data []byte) (persistedSession[T], error)
 }
 
 // gobCodec is a codec that uses Go's gob encoding
-type gobCodec struct{}
-
-var _ codec = (*gobCodec)(nil)
-
-func init() {
-	// register with a fixed name, so renames/refactors don't break existing
-	// data.
-	gob.RegisterName("lds.li/session.persistedSession", persistedSession{})
-}
+type gobCodec[T any] struct{}
 
 type flashLevel string
 
@@ -37,8 +29,8 @@ const (
 // persistedSession is the type that codecs are passed to serialize. Changes to
 // this must be forward/backwards compatible. If we ever expose codec, we should
 // think about stability beyond gob.
-type persistedSession struct {
-	Data      map[string]any
+type persistedSession[T any] struct {
+	Data      T
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Flash     flashLevel
@@ -65,7 +57,7 @@ type persistedSession struct {
 	DBSCCurrentCookieID string
 }
 
-func (g *gobCodec) Encode(sess persistedSession) ([]byte, error) {
+func (g *gobCodec[T]) Encode(sess persistedSession[T]) ([]byte, error) {
 	var buf bytes.Buffer
 
 	if err := gob.NewEncoder(&buf).Encode(sess); err != nil {
@@ -75,12 +67,12 @@ func (g *gobCodec) Encode(sess persistedSession) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (g *gobCodec) Decode(data []byte) (persistedSession, error) {
-	var result persistedSession
+func (g *gobCodec[T]) Decode(data []byte) (persistedSession[T], error) {
+	var result persistedSession[T]
 
 	err := gob.NewDecoder(bytes.NewReader(data)).Decode(&result)
 	if err != nil {
-		return persistedSession{}, fmt.Errorf("decoding session data: %w", err)
+		return persistedSession[T]{}, fmt.Errorf("decoding session data: %w", err)
 	}
 
 	return result, nil
