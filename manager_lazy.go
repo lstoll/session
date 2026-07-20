@@ -92,7 +92,7 @@ func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx 
 		return true
 	}
 
-	if err := m.dbscStore.verifyChallenge(r, sctx, jti, false); err != nil {
+	if err := verifyDBSCChallenge(sctx, jti, false); err != nil {
 		slog.WarnContext(r.Context(), "DBSC challenge verification failed", "err", err)
 		m.dbscIssueInBandChallenge(w, r, sctx)
 		return true
@@ -104,10 +104,7 @@ func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx 
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return true
 	}
-	if err := m.dbscStore.consumeChallenge(r, sctx, jti); err != nil {
-		m.handleErr(w, r, err)
-		return true
-	}
+	consumeDBSCChallenge(sctx, jti)
 
 	sctx.sessdata.DBSCExpiration = time.Now().Add(m.opts.DBSCRefreshInterval)
 	sctx.sessdata.DBSCCurrentCookieID = rand.Text()

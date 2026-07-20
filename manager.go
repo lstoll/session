@@ -33,16 +33,9 @@ type sessionStore[T any] interface {
 	touch(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error
 }
 
-type dbscChallengeStore[T any] interface {
-	generateChallenge(r *http.Request, sctx *Session[T], isRegister bool) (string, error)
-	verifyChallenge(r *http.Request, sctx *Session[T], challengeStr string, isRegister bool) error
-	consumeChallenge(r *http.Request, sctx *Session[T], challengeStr string) error
-}
-
 // Manager handles both session data and storage.
 type Manager[T any] struct {
 	store          sessionStore[T]
-	dbscStore      dbscChallengeStore[T]
 	cookieSettings SessionCookieOpts
 	codec          codec[T]
 	opts           managerOpts[T]
@@ -199,15 +192,13 @@ func NewKVManager[T any](kv KV, opts *KVManagerOpts[T]) (*Manager[T], error) {
 		}
 	}
 
-	store := &kvStore[T]{
+	m.store = &kvStore[T]{
 		m:              m,
 		kv:             kv,
 		codec:          m.codec,
 		cookieSettings: m.cookieSettings,
 		mac:            sessionIDMAC,
 	}
-	m.store = store
-	m.dbscStore = store
 
 	m.lazyLoad = !eagerLoad
 
@@ -339,7 +330,7 @@ func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 		if dbscEnabled {
 			ctx = context.WithValue(ctx, dbscServeConfigKey{}, dbscServeConfig[T]{
 				RegistrationPath:  m.dbscRegistrationPath(),
-				GenerateChallenge: m.dbscStore.generateChallenge,
+				GenerateChallenge: issueDBSCChallenge[T],
 			})
 		}
 		r = r.WithContext(ctx)
@@ -537,7 +528,7 @@ func (m *Manager[T]) maybeAttachDBSCRegistrationOffer(w http.ResponseWriter, r *
 		return
 	}
 
-	challenge, err := m.dbscStore.generateChallenge(r, sctx, true)
+	challenge, err := issueDBSCChallenge(sctx, true)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "failed to generate registration challenge", "error", err)
 		return
@@ -684,7 +675,7 @@ func (m *Manager[T]) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Re
 		return true
 	}
 
-	if err := m.dbscStore.verifyChallenge(r, sctx, jti, true); err != nil {
+	if err := verifyDBSCChallenge(sctx, jti, true); err != nil {
 		slog.WarnContext(r.Context(), "DBSC registration challenge verification failed", "err", err)
 		http.Error(w, "invalid registration proof", http.StatusUnauthorized)
 		return true
@@ -754,7 +745,7 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 		return m.dbscIssueRefreshChallenge(w, r, sctx)
 	}
 
-	if err := m.dbscStore.verifyChallenge(r, sctx, jti, false); err != nil {
+	if err := verifyDBSCChallenge(sctx, jti, false); err != nil {
 		slog.WarnContext(r.Context(), "DBSC refresh challenge verification failed", "err", err)
 		return m.dbscIssueRefreshChallenge(w, r, sctx)
 	}
@@ -764,10 +755,7 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid refresh proof", http.StatusUnauthorized)
 		return true
 	}
-	if err := m.dbscStore.consumeChallenge(r, sctx, jti); err != nil {
-		m.handleErr(w, r, err)
-		return true
-	}
+	consumeDBSCChallenge(sctx, jti)
 
 	sctx.sessdata.DBSCExpiration = time.Now().Add(m.opts.DBSCRefreshInterval)
 
@@ -797,7 +785,7 @@ func (m *Manager[T]) handleErr(w http.ResponseWriter, r *http.Request, err error
 }
 
 func (m *Manager[T]) dbscIssueInBandChallenge(w http.ResponseWriter, r *http.Request, sctx *Session[T]) {
-	nonce, err := m.dbscStore.generateChallenge(r, sctx, false)
+	nonce, err := issueDBSCChallenge(sctx, false)
 	if err != nil {
 		m.handleErr(w, r, err)
 		return
@@ -807,7 +795,7 @@ func (m *Manager[T]) dbscIssueInBandChallenge(w http.ResponseWriter, r *http.Req
 }
 
 func (m *Manager[T]) dbscIssueRefreshChallenge(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
-	nonce, err := m.dbscStore.generateChallenge(r, sctx, false)
+	nonce, err := issueDBSCChallenge(sctx, false)
 	if err != nil {
 		m.handleErr(w, r, err)
 		return true

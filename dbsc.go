@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -20,11 +21,80 @@ const dbscClaimTyp = "dbsc+jwt"
 // dbscProofMaxAge matches the server-side challenge TTL.
 const dbscProofMaxAge = 5 * time.Minute
 
+// dbscMaxRecentChallenges bounds persisted session growth while allowing a
+// proof for a recently superseded challenge to arrive after a newer one.
+const dbscMaxRecentChallenges = 4
+
+type dbscChallenge struct {
+	Value     string
+	ExpiresAt time.Time
+}
+
+func issueDBSCChallenge[T any](sctx *Session[T], isRegister bool) (string, error) {
+	challenge := rand.Text()
+	if isRegister {
+		sctx.sessdata.DBSCRegistrationChallenge = challenge
+		sctx.state = sessionDirty
+		return challenge, nil
+	}
+	if sctx.sessdata.DBSCSessionID == "" {
+		return "", errors.New("cannot issue refresh challenge without DBSC session ID")
+	}
+
+	now := time.Now()
+	recent := sctx.sessdata.DBSCChallenges[:0]
+	for _, existing := range sctx.sessdata.DBSCChallenges {
+		if existing.ExpiresAt.After(now) {
+			recent = append(recent, existing)
+		}
+	}
+	if len(recent) >= dbscMaxRecentChallenges {
+		recent = recent[len(recent)-dbscMaxRecentChallenges+1:]
+	}
+	sctx.sessdata.DBSCChallenges = append(recent, dbscChallenge{
+		Value:     challenge,
+		ExpiresAt: now.Add(dbscProofMaxAge),
+	})
+	sctx.state = sessionDirty
+	return challenge, nil
+}
+
+func verifyDBSCChallenge[T any](sctx *Session[T], challenge string, isRegister bool) error {
+	if isRegister {
+		if challenge == "" || sctx.sessdata.DBSCRegistrationChallenge != challenge {
+			return errors.New("registration challenge mismatch or missing")
+		}
+		return nil
+	}
+
+	now := time.Now()
+	for _, recent := range sctx.sessdata.DBSCChallenges {
+		if recent.Value == challenge && recent.ExpiresAt.After(now) {
+			return nil
+		}
+	}
+	return errors.New("refresh challenge mismatch, missing, or expired")
+}
+
+func consumeDBSCChallenge[T any](sctx *Session[T], challenge string) {
+	now := time.Now()
+	recent := sctx.sessdata.DBSCChallenges[:0]
+	for _, existing := range sctx.sessdata.DBSCChallenges {
+		if existing.Value != challenge && existing.ExpiresAt.After(now) {
+			recent = append(recent, existing)
+		}
+	}
+	if len(recent) != len(sctx.sessdata.DBSCChallenges) {
+		sctx.sessdata.DBSCChallenges = recent
+		sctx.state = sessionDirty
+	}
+}
+
 func dbscValidator() (*jwt.Validator, error) {
 	return jwt.NewValidator(&jwt.ValidatorOpts{
-		IgnoreIssuer:           true,
-		IgnoreAudiences:        true,
-		ExpectedTypeHeader:     new(dbscClaimTyp),
+		IgnoreIssuer:       true,
+		IgnoreAudiences:    true,
+		ExpectedTypeHeader: new(dbscClaimTyp),
 		// DBSC proofs do not carry exp; freshness is enforced via jti/challenge
 		// binding and, when present, iat (see validateDBSCProofFreshness). If a
 		// client includes exp, Tink still rejects expired tokens.

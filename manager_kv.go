@@ -213,67 +213,6 @@ func (s *kvStore[T]) writeSessionCookie(w http.ResponseWriter, expiresAt time.Ti
 	return nil
 }
 
-func (s *kvStore[T]) generateChallenge(r *http.Request, sctx *Session[T], isRegister bool) (string, error) {
-	challenge := rand.Text()
-	if isRegister {
-		sctx.sessdata.DBSCRegistrationChallenge = challenge
-		sctx.state = sessionDirty
-		return challenge, nil
-	}
-
-	sessionID := sctx.sessdata.DBSCSessionID
-	if sessionID == "" {
-		return "", errors.New("cannot issue refresh challenge without DBSC session ID")
-	}
-	if err := s.kv.Set(r.Context(), dbscChallengeKey(sessionID, challenge), time.Now().Add(dbscProofMaxAge), []byte{1}); err != nil {
-		return "", fmt.Errorf("storing DBSC challenge: %w", err)
-	}
-	return challenge, nil
-}
-
-func (s *kvStore[T]) verifyChallenge(r *http.Request, sctx *Session[T], challengeStr string, isRegister bool) error {
-	if isRegister {
-		if sctx.sessdata.DBSCRegistrationChallenge == "" || sctx.sessdata.DBSCRegistrationChallenge != challengeStr {
-			return errors.New("registration challenge mismatch or missing")
-		}
-		return nil
-	}
-	sessionID := sctx.sessdata.DBSCSessionID
-	legacyChallenge := sctx.sessdata.DBSCChallenge
-	legacyIssuedAt := sctx.sessdata.DBSCChallengeIssuedAt
-
-	data, found, err := s.kv.Get(r.Context(), dbscChallengeKey(sessionID, challengeStr))
-	if err != nil {
-		return fmt.Errorf("loading DBSC challenge: %w", err)
-	}
-	if found && len(data) == 1 && data[0] == 1 {
-		return nil
-	}
-	// Accept one challenge persisted by versions before independent challenge
-	// records were introduced, so in-flight upgrades do not break refreshes.
-	if legacyChallenge == challengeStr && !legacyIssuedAt.IsZero() && time.Since(legacyIssuedAt) <= dbscProofMaxAge {
-		return nil
-	}
-	return errors.New("refresh challenge mismatch, missing, or expired")
-}
-
-func (s *kvStore[T]) consumeChallenge(r *http.Request, sctx *Session[T], challengeStr string) error {
-	sessionID := sctx.sessdata.DBSCSessionID
-	if sctx.sessdata.DBSCChallenge == challengeStr {
-		sctx.sessdata.DBSCChallenge = ""
-		sctx.sessdata.DBSCChallengeIssuedAt = time.Time{}
-		sctx.state = sessionDirty
-	}
-	if err := s.kv.Delete(r.Context(), dbscChallengeKey(sessionID, challengeStr)); err != nil {
-		return fmt.Errorf("consuming DBSC challenge: %w", err)
-	}
-	return nil
-}
-
-func dbscChallengeKey(sessionID, challenge string) string {
-	return managerHashSessionID("dbsc-challenge:" + sessionID + ":" + challenge)
-}
-
 // Generate a consistent hash of session ID for KV storage
 func managerHashSessionID(id string) string {
 	h := sha256.New()

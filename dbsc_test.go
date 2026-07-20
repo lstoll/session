@@ -96,38 +96,59 @@ func TestDBSC(t *testing.T) {
 	})
 }
 
-func TestDBSCConcurrentRefreshChallenges(t *testing.T) {
-	kv := &memoryKV{contents: make(map[string]kvItem)}
-	store := &kvStore[testSessionData]{kv: kv}
+func TestDBSCRecentRefreshChallenges(t *testing.T) {
 	sctx := &Session[testSessionData]{sessdata: persistedSession[testSessionData]{DBSCSessionID: "dbsc-session"}}
-	req := httptest.NewRequest(http.MethodPost, "/dbsc/refresh", nil)
 
-	first, err := store.generateChallenge(req, sctx, false)
+	first, err := issueDBSCChallenge(sctx, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.generateChallenge(req, sctx, false)
+	second, err := issueDBSCChallenge(sctx, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first == second {
 		t.Fatal("independently generated challenges must differ")
 	}
-	if err := store.verifyChallenge(req, sctx, first, false); err != nil {
+	if err := verifyDBSCChallenge(sctx, first, false); err != nil {
 		t.Fatalf("first challenge was overwritten: %v", err)
 	}
-	if err := store.verifyChallenge(req, sctx, second, false); err != nil {
+	if err := verifyDBSCChallenge(sctx, second, false); err != nil {
 		t.Fatalf("second challenge is not valid: %v", err)
 	}
 
-	if err := store.consumeChallenge(req, sctx, first); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.verifyChallenge(req, sctx, first, false); err == nil {
+	consumeDBSCChallenge(sctx, first)
+	if err := verifyDBSCChallenge(sctx, first, false); err == nil {
 		t.Fatal("consumed challenge remains valid")
 	}
-	if err := store.verifyChallenge(req, sctx, second, false); err != nil {
+	if err := verifyDBSCChallenge(sctx, second, false); err != nil {
 		t.Fatalf("consuming first challenge invalidated second: %v", err)
+	}
+}
+
+func TestDBSCRecentRefreshChallengesAreBoundedAndExpire(t *testing.T) {
+	sctx := &Session[testSessionData]{sessdata: persistedSession[testSessionData]{DBSCSessionID: "dbsc-session"}}
+	var oldest string
+	for i := 0; i < dbscMaxRecentChallenges+1; i++ {
+		challenge, err := issueDBSCChallenge(sctx, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			oldest = challenge
+		}
+	}
+	if got := len(sctx.sessdata.DBSCChallenges); got != dbscMaxRecentChallenges {
+		t.Fatalf("stored challenges = %d, want %d", got, dbscMaxRecentChallenges)
+	}
+	if err := verifyDBSCChallenge(sctx, oldest, false); err == nil {
+		t.Fatal("oldest challenge remained valid after bounded eviction")
+	}
+
+	latest := &sctx.sessdata.DBSCChallenges[len(sctx.sessdata.DBSCChallenges)-1]
+	latest.ExpiresAt = time.Now().Add(-time.Second)
+	if err := verifyDBSCChallenge(sctx, latest.Value, false); err == nil {
+		t.Fatal("expired challenge remained valid")
 	}
 }
 

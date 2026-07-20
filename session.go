@@ -16,7 +16,7 @@ type dbscServeConfigKey struct{}
 
 type dbscServeConfig[T any] struct {
 	RegistrationPath  string
-	GenerateChallenge func(r *http.Request, sctx *Session[T], isRegister bool) (string, error)
+	GenerateChallenge func(sctx *Session[T], isRegister bool) (string, error)
 }
 
 type sessionState uint8
@@ -202,7 +202,7 @@ func (s *Session[T]) InitiateDBSCRegistration(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	challenge, err := cfg.GenerateChallenge(r, s, true)
+	challenge, err := cfg.GenerateChallenge(s, true)
 	if err != nil {
 		http.Error(w, "failed to generate registration challenge", http.StatusInternalServerError)
 		return
