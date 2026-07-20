@@ -37,15 +37,16 @@ type persistedSession[T any] struct {
 	FlashMsg  string
 
 	// --- DBSC Fields ---
-	// DBSCPublicJWKS is a JSON JWKS document (typically one key) produced by Tink
-	// from the verified registration proof, used to verify refresh proofs.
-	DBSCPublicJWKS []byte
+	// DBSCAlgorithm and DBSCPublicJWK identify the algorithm and single public
+	// key established by the verified registration proof.
+	DBSCAlgorithm string
+	DBSCPublicJWK []byte
 	// DBSCSessionID is the unique identifier sent to the browser during registration,
 	// used to identify the session during a refresh (Sec-Secure-Session-Id).
 	DBSCSessionID string
-	// DBSCRegistrationChallenge is the challenge from Secure-Session-Registration, used
-	// to verify the registration JWT's jti claim. Cleared after registration completes.
-	DBSCRegistrationChallenge string
+	// DBSCRegistrationChallenge is the pending, short-lived registration challenge.
+	// It is cleared after registration completes.
+	DBSCRegistrationChallenge dbscChallenge
 	// DBSCExpiration tracks when the current "short-lived" proof expires.
 	DBSCExpiration time.Time
 	// DBSCChallenges contains the small set of recent refresh challenges that

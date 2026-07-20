@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"lds.li/session/internal/dbscproof"
 )
 
 type sessionIDPeeker interface {
@@ -43,7 +45,7 @@ func (m *Manager[T]) ensureSessionLoaded(w http.ResponseWriter, r *http.Request,
 	m.installLoadedSession(sctx, decodedData, data)
 
 	abort := false
-	if m.opts.DBSCRefreshInterval > 0 && len(sctx.sessdata.DBSCPublicJWKS) > 0 {
+	if m.opts.DBSCRefreshInterval > 0 && len(sctx.sessdata.DBSCPublicJWK) > 0 {
 		abort = m.runDBSCInBand(w, r, sctx)
 	}
 	if abort {
@@ -85,28 +87,23 @@ func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx 
 		return true
 	}
 
-	jti, err := extractDBSCProofJTI(respHeader)
+	now := time.Now()
+	jti, err := dbscproof.VerifyRefresh(respHeader, registeredDBSCKey(sctx), now)
 	if err != nil {
-		slog.WarnContext(r.Context(), "DBSC proof invalid format", "err", err)
+		slog.WarnContext(r.Context(), "DBSC verification failed", "err", err)
 		m.dbscIssueInBandChallenge(w, r, sctx)
 		return true
 	}
 
-	if err := verifyDBSCChallenge(sctx, jti, false); err != nil {
+	if err := verifyDBSCRefreshChallenge(sctx, jti, now); err != nil {
 		slog.WarnContext(r.Context(), "DBSC challenge verification failed", "err", err)
 		m.dbscIssueInBandChallenge(w, r, sctx)
 		return true
 	}
 
-	if err := verifyDBSCResponse(respHeader, sctx.sessdata.DBSCPublicJWKS, jti); err != nil {
-		slog.WarnContext(r.Context(), "DBSC verification failed", "err", err)
-		sctx.Delete()
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return true
-	}
-	consumeDBSCChallenge(sctx, jti)
+	consumeDBSCRefreshChallenge(sctx, jti, now)
 
-	sctx.sessdata.DBSCExpiration = time.Now().Add(m.opts.DBSCRefreshInterval)
+	sctx.sessdata.DBSCExpiration = now.Add(m.opts.DBSCRefreshInterval)
 	sctx.sessdata.DBSCCurrentCookieID = rand.Text()
 	sctx.Reset()
 	return false

@@ -3,8 +3,6 @@ package session
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base32"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tink-crypto/tink-go/v2/tink"
+	"lds.li/session/internal/dbscproof"
 )
 
 // FromContext returns the Session this Manager stored in ctx.
@@ -320,7 +319,7 @@ func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 			}
 		}
 
-		if dbscEnabled && !m.lazyLoad && len(sctx.sessdata.DBSCPublicJWKS) > 0 {
+		if dbscEnabled && !m.lazyLoad && len(sctx.sessdata.DBSCPublicJWK) > 0 {
 			if m.runDBSCInBand(hw, r, sctx) {
 				return
 			}
@@ -329,8 +328,8 @@ func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), sessionContextKey[T]{manager: m}, sctx)
 		if dbscEnabled {
 			ctx = context.WithValue(ctx, dbscServeConfigKey{}, dbscServeConfig[T]{
-				RegistrationPath:  m.dbscRegistrationPath(),
-				GenerateChallenge: issueDBSCChallenge[T],
+				RegistrationPath:              m.dbscRegistrationPath(),
+				GenerateRegistrationChallenge: issueDBSCRegistrationChallenge[T],
 			})
 		}
 		r = r.WithContext(ctx)
@@ -407,7 +406,7 @@ func (m *Manager[T]) saveHook(r *http.Request, sctx *Session[T]) func(w http.Res
 // saveSession saves the session data to the appropriate storage
 func (m *Manager[T]) saveSession(w http.ResponseWriter, r *http.Request, sctx *Session[T]) error {
 	// If device-bound and DBSCCurrentCookieID is empty, generate one
-	if len(sctx.sessdata.DBSCPublicJWKS) > 0 && sctx.sessdata.DBSCCurrentCookieID == "" {
+	if len(sctx.sessdata.DBSCPublicJWK) > 0 && sctx.sessdata.DBSCCurrentCookieID == "" {
 		sctx.sessdata.DBSCCurrentCookieID = rand.Text()
 	}
 
@@ -519,22 +518,19 @@ func (m *Manager[T]) maybeAttachDBSCRegistrationOffer(w http.ResponseWriter, r *
 		slog.DebugContext(r.Context(), "dbsc registration offer skipped", "reason", "dbsc_not_configured")
 		return
 	}
-	if len(sctx.sessdata.DBSCPublicJWKS) != 0 {
+	if len(sctx.sessdata.DBSCPublicJWK) != 0 {
 		slog.DebugContext(r.Context(), "dbsc registration offer skipped", "reason", "already_device_bound")
 		return
 	}
-	if sctx.sessdata.DBSCRegistrationChallenge != "" {
+	now := time.Now()
+	if hasPendingDBSCRegistrationChallenge(sctx, now) {
 		slog.DebugContext(r.Context(), "dbsc registration offer skipped", "reason", "challenge_already_pending")
 		return
 	}
 
-	challenge, err := issueDBSCChallenge(sctx, true)
-	if err != nil {
-		slog.ErrorContext(r.Context(), "failed to generate registration challenge", "error", err)
-		return
-	}
+	challenge := issueDBSCRegistrationChallenge(sctx, now)
 
-	w.Header().Add("Secure-Session-Registration", `(ES256);path="`+m.dbscRegistrationPath()+`";challenge="`+challenge+`"`)
+	w.Header().Add("Secure-Session-Registration", dbscRegistrationHeader(m.dbscRegistrationPath(), challenge))
 	slog.DebugContext(r.Context(), "dbsc registration offer attached",
 		"registration_path", m.dbscRegistrationPath(),
 		"challenge_len", len(challenge))
@@ -545,7 +541,7 @@ func (m *Manager[T]) dbscBoundCookieName() string {
 }
 
 func (m *Manager[T]) setDBSCBoundCookie(w http.ResponseWriter, sctx *Session[T]) {
-	if len(sctx.sessdata.DBSCPublicJWKS) == 0 {
+	if len(sctx.sessdata.DBSCPublicJWK) == 0 {
 		return
 	}
 	// If DBSCCurrentCookieID is empty, generate one
@@ -654,8 +650,8 @@ func (m *Manager[T]) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Re
 	}
 	slog.DebugContext(r.Context(), "dbsc registration handler considering request",
 		"method", r.Method, "path", r.URL.Path,
-		"has_jwks", len(sctx.sessdata.DBSCPublicJWKS) > 0)
-	if len(sctx.sessdata.DBSCPublicJWKS) != 0 {
+		"has_jwk", len(sctx.sessdata.DBSCPublicJWK) > 0)
+	if len(sctx.sessdata.DBSCPublicJWK) != 0 {
 		slog.DebugContext(r.Context(), "dbsc registration POST not handled", "reason", "already_bound")
 		return false
 	}
@@ -668,32 +664,27 @@ func (m *Manager[T]) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Re
 	}
 	slog.DebugContext(r.Context(), "dbsc registration verifying proof", "header_len", len(tok))
 
-	jti, err := extractDBSCProofJTI(tok)
-	if err != nil {
-		slog.WarnContext(r.Context(), "DBSC registration proof invalid format", "err", err)
-		http.Error(w, "invalid registration proof", http.StatusUnauthorized)
-		return true
-	}
-
-	if err := verifyDBSCChallenge(sctx, jti, true); err != nil {
-		slog.WarnContext(r.Context(), "DBSC registration challenge verification failed", "err", err)
-		http.Error(w, "invalid registration proof", http.StatusUnauthorized)
-		return true
-	}
-
-	jwks, err := verifyDBSCRegistrationProofAndJWKS(r.Context(), tok, jti)
+	now := time.Now()
+	registration, err := dbscproof.VerifyRegistration(tok, now)
 	if err != nil {
 		slog.WarnContext(r.Context(), "DBSC registration proof rejected", "err", err)
 		http.Error(w, "invalid registration proof", http.StatusUnauthorized)
 		return true
 	}
 
-	sessionID := deriveDBSCSessionID(jwks)
+	if err := verifyDBSCRegistrationChallenge(sctx, registration.Challenge, now); err != nil {
+		slog.WarnContext(r.Context(), "DBSC registration challenge verification failed", "err", err)
+		http.Error(w, "invalid registration proof", http.StatusUnauthorized)
+		return true
+	}
 
-	sctx.sessdata.DBSCRegistrationChallenge = ""
-	sctx.sessdata.DBSCPublicJWKS = jwks
+	sessionID := rand.Text()
+
+	sctx.sessdata.DBSCRegistrationChallenge = dbscChallenge{}
+	sctx.sessdata.DBSCAlgorithm = registration.Key.Algorithm
+	sctx.sessdata.DBSCPublicJWK = registration.Key.JWK
 	sctx.sessdata.DBSCSessionID = sessionID
-	sctx.sessdata.DBSCExpiration = time.Now().Add(m.opts.DBSCRefreshInterval)
+	sctx.sessdata.DBSCExpiration = now.Add(m.opts.DBSCRefreshInterval)
 	sctx.state = sessionDirty
 
 	body, err := m.dbscRegistrationInstructions(sessionID)
@@ -720,7 +711,7 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 		http.Error(w, "Cross-site refresh rejected", http.StatusForbidden)
 		return true
 	}
-	if len(sctx.sessdata.DBSCPublicJWKS) == 0 {
+	if len(sctx.sessdata.DBSCPublicJWK) == 0 {
 		http.Error(w, "session not device-bound", http.StatusUnauthorized)
 		return true
 	}
@@ -739,25 +730,22 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 		return m.dbscIssueRefreshChallenge(w, r, sctx)
 	}
 
-	jti, err := extractDBSCProofJTI(tok)
+	now := time.Now()
+	jti, err := dbscproof.VerifyRefresh(tok, registeredDBSCKey(sctx), now)
 	if err != nil {
-		slog.WarnContext(r.Context(), "DBSC refresh proof invalid format", "err", err)
-		return m.dbscIssueRefreshChallenge(w, r, sctx)
-	}
-
-	if err := verifyDBSCChallenge(sctx, jti, false); err != nil {
-		slog.WarnContext(r.Context(), "DBSC refresh challenge verification failed", "err", err)
-		return m.dbscIssueRefreshChallenge(w, r, sctx)
-	}
-
-	if err := verifyDBSCResponse(tok, sctx.sessdata.DBSCPublicJWKS, jti); err != nil {
 		slog.WarnContext(r.Context(), "DBSC refresh proof rejected", "err", err)
 		http.Error(w, "invalid refresh proof", http.StatusUnauthorized)
 		return true
 	}
-	consumeDBSCChallenge(sctx, jti)
 
-	sctx.sessdata.DBSCExpiration = time.Now().Add(m.opts.DBSCRefreshInterval)
+	if err := verifyDBSCRefreshChallenge(sctx, jti, now); err != nil {
+		slog.WarnContext(r.Context(), "DBSC refresh challenge verification failed", "err", err)
+		return m.dbscIssueRefreshChallenge(w, r, sctx)
+	}
+
+	consumeDBSCRefreshChallenge(sctx, jti, now)
+
+	sctx.sessdata.DBSCExpiration = now.Add(m.opts.DBSCRefreshInterval)
 
 	// Generate new bound cookie value to rotate it
 	sctx.sessdata.DBSCCurrentCookieID = rand.Text()
@@ -785,7 +773,7 @@ func (m *Manager[T]) handleErr(w http.ResponseWriter, r *http.Request, err error
 }
 
 func (m *Manager[T]) dbscIssueInBandChallenge(w http.ResponseWriter, r *http.Request, sctx *Session[T]) {
-	nonce, err := issueDBSCChallenge(sctx, false)
+	nonce, err := issueDBSCRefreshChallenge(sctx, time.Now())
 	if err != nil {
 		m.handleErr(w, r, err)
 		return
@@ -795,7 +783,7 @@ func (m *Manager[T]) dbscIssueInBandChallenge(w http.ResponseWriter, r *http.Req
 }
 
 func (m *Manager[T]) dbscIssueRefreshChallenge(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
-	nonce, err := issueDBSCChallenge(sctx, false)
+	nonce, err := issueDBSCRefreshChallenge(sctx, time.Now())
 	if err != nil {
 		m.handleErr(w, r, err)
 		return true
@@ -803,14 +791,6 @@ func (m *Manager[T]) dbscIssueRefreshChallenge(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Secure-Session-Challenge", `"`+nonce+`";id="`+sctx.sessdata.DBSCSessionID+`"`)
 	w.WriteHeader(http.StatusForbidden)
 	return true
-}
-
-func deriveDBSCSessionID(jwks []byte) string {
-	if len(jwks) == 0 {
-		return ""
-	}
-	h := sha256.Sum256(jwks)
-	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(h[:])
 }
 
 func dbscSessionSkipped(r *http.Request) bool {

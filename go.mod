@@ -2,7 +2,10 @@ module lds.li/session
 
 go 1.26
 
-require github.com/tink-crypto/tink-go/v2 v2.7.0
+require (
+	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/tink-crypto/tink-go/v2 v2.7.0
+)
 
 require (
 	golang.org/x/crypto v0.53.0 // indirect

@@ -15,8 +15,8 @@ type sessionContextKey[T any] struct {
 type dbscServeConfigKey struct{}
 
 type dbscServeConfig[T any] struct {
-	RegistrationPath  string
-	GenerateChallenge func(sctx *Session[T], isRegister bool) (string, error)
+	RegistrationPath              string
+	GenerateRegistrationChallenge func(sctx *Session[T], now time.Time) string
 }
 
 type sessionState uint8
@@ -179,7 +179,7 @@ func (s *Session[T]) IsDeviceBound() bool {
 		return false
 	}
 
-	return len(s.sessdata.DBSCPublicJWKS) > 0
+	return len(s.sessdata.DBSCPublicJWK) > 0
 }
 
 // InitiateDBSCRegistration adds Secure-Session-Registration immediately.
@@ -197,18 +197,14 @@ func (s *Session[T]) InitiateDBSCRegistration(w http.ResponseWriter, r *http.Req
 	}
 
 	cfg, ok := r.Context().Value(dbscServeConfigKey{}).(dbscServeConfig[T])
-	if !ok || cfg.RegistrationPath == "" || cfg.GenerateChallenge == nil {
+	if !ok || cfg.RegistrationPath == "" || cfg.GenerateRegistrationChallenge == nil {
 		http.Error(w, "DBSC registration not configured on session manager", http.StatusInternalServerError)
 		return
 	}
 
-	challenge, err := cfg.GenerateChallenge(s, true)
-	if err != nil {
-		http.Error(w, "failed to generate registration challenge", http.StatusInternalServerError)
-		return
-	}
+	challenge := cfg.GenerateRegistrationChallenge(s, time.Now())
 
-	w.Header().Add("Secure-Session-Registration", `(ES256);path="`+cfg.RegistrationPath+`";challenge="`+challenge+`"`)
+	w.Header().Add("Secure-Session-Registration", dbscRegistrationHeader(cfg.RegistrationPath, challenge))
 	slog.DebugContext(r.Context(), "dbsc InitiateDBSCRegistration",
 		"path", cfg.RegistrationPath, "challenge_len", len(challenge))
 }

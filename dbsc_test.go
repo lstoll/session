@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +16,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
+	josejwt "github.com/go-jose/go-jose/v4/jwt"
 )
 
 func generateJWTSignature(t *testing.T, privKey *ecdsa.PrivateKey, header, payload string) string {
@@ -96,41 +100,108 @@ func TestDBSC(t *testing.T) {
 	})
 }
 
-func TestDBSCRecentRefreshChallenges(t *testing.T) {
-	sctx := &Session[testSessionData]{sessdata: persistedSession[testSessionData]{DBSCSessionID: "dbsc-session"}}
-
-	first, err := issueDBSCChallenge(sctx, false)
+func TestDBSCRS256RegistrationAndRefresh(t *testing.T) {
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	_, handler, _, _ := setupDBSCHandler(t, kv, 5*time.Minute)
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := issueDBSCChallenge(sctx, false)
+
+	reqStart := newTestRequest(http.MethodGet, "/start", nil)
+	rrStart := httptest.NewRecorder()
+	handler.ServeHTTP(rrStart, reqStart)
+	registrationChallenge := challengeFromSecureSessionRegistration(t, rrStart.Header().Get("Secure-Session-Registration"))
+	cookies := extractCookies(rrStart)
+
+	reqRegistration := newTestRequest(http.MethodPost, "/register", nil)
+	addCookies(reqRegistration, cookies)
+	reqRegistration.Header.Set("Secure-Session-Response", dbscJOSEProofJWT(t, jose.RS256, private, registrationChallenge, true))
+	rrRegistration := httptest.NewRecorder()
+	handler.ServeHTTP(rrRegistration, reqRegistration)
+	if rrRegistration.Code != http.StatusOK {
+		t.Fatalf("RS256 registration: got %d %s", rrRegistration.Code, rrRegistration.Body.String())
+	}
+	var instructions map[string]any
+	if err := json.Unmarshal(rrRegistration.Body.Bytes(), &instructions); err != nil {
+		t.Fatal(err)
+	}
+	sessionID, _ := instructions["session_identifier"].(string)
+	if sessionID == "" {
+		t.Fatal("RS256 registration returned no session identifier")
+	}
+	cookies = mergeCookies(cookies, extractCookies(rrRegistration))
+
+	reqChallenge := newTestRequest(http.MethodPost, "/dbsc/refresh", nil)
+	addCookies(reqChallenge, cookies)
+	reqChallenge.Header.Set("Sec-Secure-Session-Id", `"`+sessionID+`"`)
+	rrChallenge := httptest.NewRecorder()
+	handler.ServeHTTP(rrChallenge, reqChallenge)
+	refreshChallenge := challengeNonceFromHeader(t, rrChallenge.Header().Get("Secure-Session-Challenge"))
+	cookies = mergeCookies(cookies, extractCookies(rrChallenge))
+
+	reqRefresh := newTestRequest(http.MethodPost, "/dbsc/refresh", nil)
+	addCookies(reqRefresh, cookies)
+	reqRefresh.Header.Set("Sec-Secure-Session-Id", `"`+sessionID+`"`)
+	reqRefresh.Header.Set("Secure-Session-Response", dbscJOSEProofJWT(t, jose.RS256, private, refreshChallenge, false))
+	rrRefresh := httptest.NewRecorder()
+	handler.ServeHTTP(rrRefresh, reqRefresh)
+	if rrRefresh.Code != http.StatusOK {
+		t.Fatalf("RS256 refresh: got %d %s", rrRefresh.Code, rrRefresh.Body.String())
+	}
+}
+
+func dbscJOSEProofJWT(t *testing.T, algorithm jose.SignatureAlgorithm, private any, challenge string, embedJWK bool) string {
+	t.Helper()
+	opts := (&jose.SignerOptions{EmbedJWK: embedJWK}).WithType("dbsc+jwt")
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: algorithm, Key: private}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := josejwt.Signed(signer).Claims(josejwt.Claims{ID: challenge}).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compact
+}
+
+func TestDBSCRecentRefreshChallenges(t *testing.T) {
+	sctx := &Session[testSessionData]{sessdata: persistedSession[testSessionData]{DBSCSessionID: "dbsc-session"}}
+	now := time.Now()
+
+	first, err := issueDBSCRefreshChallenge(sctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := issueDBSCRefreshChallenge(sctx, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first == second {
 		t.Fatal("independently generated challenges must differ")
 	}
-	if err := verifyDBSCChallenge(sctx, first, false); err != nil {
+	if err := verifyDBSCRefreshChallenge(sctx, first, now); err != nil {
 		t.Fatalf("first challenge was overwritten: %v", err)
 	}
-	if err := verifyDBSCChallenge(sctx, second, false); err != nil {
+	if err := verifyDBSCRefreshChallenge(sctx, second, now); err != nil {
 		t.Fatalf("second challenge is not valid: %v", err)
 	}
 
-	consumeDBSCChallenge(sctx, first)
-	if err := verifyDBSCChallenge(sctx, first, false); err == nil {
+	consumeDBSCRefreshChallenge(sctx, first, now)
+	if err := verifyDBSCRefreshChallenge(sctx, first, now); err == nil {
 		t.Fatal("consumed challenge remains valid")
 	}
-	if err := verifyDBSCChallenge(sctx, second, false); err != nil {
+	if err := verifyDBSCRefreshChallenge(sctx, second, now); err != nil {
 		t.Fatalf("consuming first challenge invalidated second: %v", err)
 	}
 }
 
 func TestDBSCRecentRefreshChallengesAreBoundedAndExpire(t *testing.T) {
 	sctx := &Session[testSessionData]{sessdata: persistedSession[testSessionData]{DBSCSessionID: "dbsc-session"}}
+	now := time.Now()
 	var oldest string
 	for i := 0; i < dbscMaxRecentChallenges+1; i++ {
-		challenge, err := issueDBSCChallenge(sctx, false)
+		challenge, err := issueDBSCRefreshChallenge(sctx, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -141,13 +212,13 @@ func TestDBSCRecentRefreshChallengesAreBoundedAndExpire(t *testing.T) {
 	if got := len(sctx.sessdata.DBSCChallenges); got != dbscMaxRecentChallenges {
 		t.Fatalf("stored challenges = %d, want %d", got, dbscMaxRecentChallenges)
 	}
-	if err := verifyDBSCChallenge(sctx, oldest, false); err == nil {
+	if err := verifyDBSCRefreshChallenge(sctx, oldest, now); err == nil {
 		t.Fatal("oldest challenge remained valid after bounded eviction")
 	}
 
 	latest := &sctx.sessdata.DBSCChallenges[len(sctx.sessdata.DBSCChallenges)-1]
-	latest.ExpiresAt = time.Now().Add(-time.Second)
-	if err := verifyDBSCChallenge(sctx, latest.Value, false); err == nil {
+	latest.ExpiresAt = now.Add(-time.Second)
+	if err := verifyDBSCRefreshChallenge(sctx, latest.Value, now); err == nil {
 		t.Fatal("expired challenge remained valid")
 	}
 }
@@ -183,7 +254,7 @@ func TestDBSCRegistrationAndRefreshCommitOnce(t *testing.T) {
 	}
 }
 
-func TestDBSCInvalidInBandProofDeletesSession(t *testing.T) {
+func TestDBSCInvalidInBandProofIssuesNewChallenge(t *testing.T) {
 	refreshInterval := time.Millisecond
 	kv := &memoryKV{contents: make(map[string]kvItem)}
 	_, handler, privKey, _ := setupDBSCHandler(t, kv, refreshInterval)
@@ -205,19 +276,66 @@ func TestDBSCInvalidInBandProofDeletesSession(t *testing.T) {
 	reqProof.Header.Set("Secure-Session-Response", dbscProofJWT(t, wrongKey, nonce, false))
 	rrProof := httptest.NewRecorder()
 	handler.ServeHTTP(rrProof, reqProof)
-	if rrProof.Code != http.StatusUnauthorized {
-		t.Fatalf("invalid proof: got %d, want 401", rrProof.Code)
+	if rrProof.Code != http.StatusForbidden {
+		t.Fatalf("invalid proof: got %d, want 403", rrProof.Code)
+	}
+	if rrProof.Header().Get("Secure-Session-Challenge") == "" {
+		t.Fatal("invalid proof did not receive a replacement challenge")
+	}
+}
+
+func TestDBSCRegistrationChallengeExpires(t *testing.T) {
+	now := time.Now()
+	sctx := &Session[testSessionData]{}
+	challenge := issueDBSCRegistrationChallenge(sctx, now)
+
+	if err := verifyDBSCRegistrationChallenge(sctx, challenge, now); err != nil {
+		t.Fatalf("fresh registration challenge rejected: %v", err)
+	}
+	if !hasPendingDBSCRegistrationChallenge(sctx, now) {
+		t.Fatal("fresh registration challenge is not pending")
 	}
 
-	reqReplay := newTestRequest(http.MethodGet, "/protected", nil)
-	addCookies(reqReplay, cookies)
-	rrReplay := httptest.NewRecorder()
-	handler.ServeHTTP(rrReplay, reqReplay)
-	if rrReplay.Code != http.StatusUnauthorized {
-		t.Fatalf("deleted session replay: got %d, want 401", rrReplay.Code)
+	afterExpiry := now.Add(dbscChallengeTTL + time.Nanosecond)
+	if err := verifyDBSCRegistrationChallenge(sctx, challenge, afterExpiry); err == nil {
+		t.Fatal("expired registration challenge accepted")
 	}
-	if rrReplay.Header().Get("Secure-Session-Challenge") != "" {
-		t.Fatal("deleted session was restored and issued another DBSC challenge")
+	if hasPendingDBSCRegistrationChallenge(sctx, afterExpiry) {
+		t.Fatal("expired registration challenge remains pending")
+	}
+
+	replacement := issueDBSCRegistrationChallenge(sctx, afterExpiry)
+	if replacement == challenge {
+		t.Fatal("expired registration challenge was not replaced")
+	}
+}
+
+func TestDBSCExpiredRegistrationChallengeIsReoffered(t *testing.T) {
+	manager := &Manager[testSessionData]{opts: managerOpts[testSessionData]{
+		DBSCRefreshInterval:  time.Minute,
+		DBSCRegistrationPath: "/register",
+	}}
+	sctx := &Session[testSessionData]{sessdata: persistedSession[testSessionData]{
+		DBSCRegistrationChallenge: dbscChallenge{
+			Value:     "expired",
+			ExpiresAt: time.Now().Add(-time.Minute),
+		},
+	}}
+	recorder := httptest.NewRecorder()
+	request := newTestRequest(http.MethodGet, "/", nil)
+
+	manager.maybeAttachDBSCRegistrationOffer(recorder, request, sctx)
+
+	header := recorder.Header().Get("Secure-Session-Registration")
+	if header == "" {
+		t.Fatal("expired registration challenge suppressed a new offer")
+	}
+	challenge := challengeFromSecureSessionRegistration(t, header)
+	if challenge == "expired" || challenge != sctx.sessdata.DBSCRegistrationChallenge.Value {
+		t.Fatalf("replacement challenge = %q, stored = %q", challenge, sctx.sessdata.DBSCRegistrationChallenge.Value)
+	}
+	if !sctx.sessdata.DBSCRegistrationChallenge.ExpiresAt.After(time.Now()) {
+		t.Fatal("replacement registration challenge is not fresh")
 	}
 }
 
