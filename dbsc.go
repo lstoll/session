@@ -134,6 +134,95 @@ func parseSFString(s string) (string, bool) {
 	return "", false
 }
 
+// dbscSessionSkipped reports whether Secure-Session-Skipped contains an
+// sf-list member whose session_identifier parameter matches sessionID.
+func dbscSessionSkipped(r *http.Request, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	raw := strings.Join(r.Header.Values("Secure-Session-Skipped"), ",")
+	members, ok := splitDBSCStructuredField(raw, ',')
+	if !ok {
+		return false
+	}
+	for _, member := range members {
+		parts, ok := splitDBSCStructuredField(member, ';')
+		if !ok || len(parts) == 0 || !isDBSCSFToken(strings.TrimSpace(parts[0])) {
+			continue
+		}
+		for _, parameter := range parts[1:] {
+			key, value, found := strings.Cut(strings.TrimSpace(parameter), "=")
+			if !found || key != "session_identifier" {
+				continue
+			}
+			parsed, ok := parseSFString(strings.TrimSpace(value))
+			if ok && parsed == sessionID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func splitDBSCStructuredField(value string, delimiter byte) ([]string, bool) {
+	if strings.TrimSpace(value) == "" {
+		return nil, true
+	}
+	var parts []string
+	start := 0
+	inString := false
+	escaped := false
+	for i := range len(value) {
+		c := value[i]
+		if inString {
+			switch {
+			case escaped:
+				if c != '\\' && c != '"' {
+					return nil, false
+				}
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			case c < 0x20 || c > 0x7e:
+				return nil, false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			continue
+		}
+		if c == delimiter {
+			parts = append(parts, value[start:i])
+			start = i + 1
+		}
+	}
+	if inString || escaped {
+		return nil, false
+	}
+	parts = append(parts, value[start:])
+	return parts, true
+}
+
+func isDBSCSFToken(value string) bool {
+	if value == "" || !isASCIIAlpha(value[0]) && value[0] != '*' {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		c := value[i]
+		if !isASCIIAlpha(c) && (c < '0' || c > '9') && !strings.ContainsRune("!#$%&'*+-.^_`|~:/", rune(c)) {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIAlpha(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
+}
+
 // dbscSessionResponseHeader reads Secure-Session-Response from a request.
 func dbscSessionResponseHeader(r *http.Request) string {
 	raw := strings.TrimSpace(r.Header.Get("Secure-Session-Response"))

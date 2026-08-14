@@ -679,12 +679,23 @@ func (m *Manager[T]) setDBSCBoundCookie(w http.ResponseWriter, sctx *Session[T])
 	}
 	switch {
 	case !sctx.sessdata.DBSCExpiration.IsZero():
-		hc.MaxAge = int(time.Until(sctx.sessdata.DBSCExpiration).Seconds())
+		hc.MaxAge = dbscCookieMaxAge(time.Until(sctx.sessdata.DBSCExpiration))
 	case m.opts.DBSCRefreshInterval > 0:
-		hc.MaxAge = int(m.opts.DBSCRefreshInterval.Seconds())
+		hc.MaxAge = dbscCookieMaxAge(m.opts.DBSCRefreshInterval)
 	}
 	managerRemoveCookieByName(w, hc.Name)
 	return managerSetCookie(w, hc)
+}
+
+func dbscCookieMaxAge(remaining time.Duration) int {
+	if remaining <= 0 {
+		return -1
+	}
+	seconds := remaining / time.Second
+	if remaining%time.Second != 0 {
+		seconds++
+	}
+	return int(seconds)
 }
 
 func (m *Manager[T]) deleteDBSCBoundCookie(w http.ResponseWriter) error {
@@ -786,7 +797,7 @@ func (m *Manager[T]) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Re
 	slog.DebugContext(r.Context(), "dbsc registration verifying proof", "header_len", len(tok))
 
 	now := time.Now()
-	registration, err := dbscproof.VerifyRegistration(tok, now)
+	registration, err := dbscproof.VerifyRegistration(tok)
 	if err != nil {
 		slog.WarnContext(r.Context(), "DBSC registration proof rejected", "err", err)
 		http.Error(w, "invalid registration proof", http.StatusUnauthorized)
@@ -836,7 +847,7 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 		http.Error(w, "session not device-bound", http.StatusUnauthorized)
 		return true
 	}
-	if m.rejectDBSCSkipped(w, r) {
+	if m.rejectDBSCSkipped(w, r, sctx.sessdata.DBSCSessionID) {
 		return true
 	}
 
@@ -852,7 +863,7 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 	}
 
 	now := time.Now()
-	jti, err := dbscproof.VerifyRefresh(tok, registeredDBSCKey(sctx), now)
+	jti, err := dbscproof.VerifyRefresh(tok, registeredDBSCKey(sctx))
 	if err != nil {
 		slog.WarnContext(r.Context(), "DBSC refresh proof rejected", "err", err)
 		http.Error(w, "invalid refresh proof", http.StatusUnauthorized)
@@ -912,8 +923,4 @@ func (m *Manager[T]) dbscIssueRefreshChallenge(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Secure-Session-Challenge", sfString(nonce)+`;id=`+sfString(sctx.sessdata.DBSCSessionID))
 	w.WriteHeader(http.StatusForbidden)
 	return true
-}
-
-func dbscSessionSkipped(r *http.Request) bool {
-	return r.Header.Get("Secure-Session-Skipped") != ""
 }

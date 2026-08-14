@@ -85,8 +85,8 @@ func TestDBSC(t *testing.T) {
 		t.Run("registration_editor_draft_jwk", func(t *testing.T) {
 			testDBSCRegistrationEditorDraftJWK(t)
 		})
-		t.Run("registration_stale_iat_rejected", func(t *testing.T) {
-			testDBSCRegistrationStaleIATRejected(t)
+		t.Run("registration_optional_iat_ignored", func(t *testing.T) {
+			testDBSCRegistrationOptionalIATIgnored(t)
 		})
 		t.Run("registration_cross_site_rejected", func(t *testing.T) {
 			testDBSCRegistrationCrossSiteRejected(t)
@@ -201,6 +201,76 @@ func TestDBSCStructuredStrings(t *testing.T) {
 	}
 	if got := sfString(`a\"b`); got != `"a\\\"b"` {
 		t.Fatalf("sfString escaped value = %q", got)
+	}
+}
+
+func TestDBSCSkippedSessionMatching(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		headers   []string
+		sessionID string
+		want      bool
+	}{
+		{
+			name:      "matching item",
+			headers:   []string{`quota_exceeded;session_identifier="session-1"`},
+			sessionID: "session-1",
+			want:      true,
+		},
+		{
+			name:      "matching item in list",
+			headers:   []string{`unreachable;session_identifier="other", server_error;detail="retry, later";session_identifier="session-1"`},
+			sessionID: "session-1",
+			want:      true,
+		},
+		{
+			name:      "matching item across fields",
+			headers:   []string{`unreachable;session_identifier="other"`, `quota_exceeded;session_identifier="session-1"`},
+			sessionID: "session-1",
+			want:      true,
+		},
+		{
+			name:      "different session",
+			headers:   []string{`quota_exceeded;session_identifier="other"`},
+			sessionID: "session-1",
+		},
+		{
+			name:      "missing identifier",
+			headers:   []string{`quota_exceeded`},
+			sessionID: "session-1",
+		},
+		{
+			name:      "malformed list",
+			headers:   []string{`quota_exceeded;session_identifier="session-1`},
+			sessionID: "session-1",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := newTestRequest(http.MethodGet, "/", nil)
+			for _, header := range tt.headers {
+				req.Header.Add("Secure-Session-Skipped", header)
+			}
+			if got := dbscSessionSkipped(req, tt.sessionID); got != tt.want {
+				t.Fatalf("dbscSessionSkipped() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDBSCCookieMaxAgeRoundsUp(t *testing.T) {
+	for _, tt := range []struct {
+		remaining time.Duration
+		want      int
+	}{
+		{remaining: -time.Nanosecond, want: -1},
+		{remaining: 0, want: -1},
+		{remaining: time.Nanosecond, want: 1},
+		{remaining: time.Second, want: 1},
+		{remaining: time.Second + time.Nanosecond, want: 2},
+	} {
+		if got := dbscCookieMaxAge(tt.remaining); got != tt.want {
+			t.Errorf("dbscCookieMaxAge(%v) = %d, want %d", tt.remaining, got, tt.want)
+		}
 	}
 }
 
@@ -398,7 +468,7 @@ func testDBSCRegistrationCrossSiteRejected(t *testing.T) {
 	}
 }
 
-func testDBSCRegistrationStaleIATRejected(t *testing.T) {
+func testDBSCRegistrationOptionalIATIgnored(t *testing.T) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}
 	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute)
@@ -415,8 +485,8 @@ func testDBSCRegistrationStaleIATRejected(t *testing.T) {
 	req1.Header.Set("Secure-Session-Response", sfString(regJWT))
 	rr1 := httptest.NewRecorder()
 	handler.ServeHTTP(rr1, req1)
-	if rr1.Code != http.StatusUnauthorized {
-		t.Fatalf("registration with stale iat: got %v want 401", rr1.Code)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("registration with optional stale iat: got %v want 200", rr1.Code)
 	}
 }
 
@@ -501,10 +571,21 @@ func testDBSCSkippedRejected(t *testing.T) {
 
 	_, dbscSessionID, cookies := completeDBSCRegistration(t, handler, privKey, nil)
 
+	t.Run("different_session", func(t *testing.T) {
+		req := newTestRequest(http.MethodGet, "/protected", nil)
+		addCookies(req, cookies)
+		req.Header.Set("Secure-Session-Skipped", `quota_exceeded;session_identifier="another-session"`)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unrelated Secure-Session-Skipped: got %v want 200", rr.Code)
+		}
+	})
+
 	t.Run("in_band", func(t *testing.T) {
 		req := newTestRequest(http.MethodGet, "/protected", nil)
 		addCookies(req, cookies)
-		req.Header.Set("Secure-Session-Skipped", `quota_exceeded;session_identifier="`+dbscSessionID+`"`)
+		req.Header.Set("Secure-Session-Skipped", `unreachable;session_identifier="another-session", quota_exceeded;session_identifier="`+dbscSessionID+`"`)
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 		if rr.Code != http.StatusUnauthorized {

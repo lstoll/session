@@ -57,8 +57,8 @@ func (m *Manager[T]) ensureSessionLoaded(w http.ResponseWriter, r *http.Request,
 // rejectDBSCSkipped rejects requests where the client could not complete DBSC.
 // Secure-Session-Skipped is a diagnostic header from the browser; it must
 // not bypass device binding. Returns true when a 401 was written.
-func (m *Manager[T]) rejectDBSCSkipped(w http.ResponseWriter, r *http.Request) bool {
-	if !dbscSessionSkipped(r) {
+func (m *Manager[T]) rejectDBSCSkipped(w http.ResponseWriter, r *http.Request, sessionID string) bool {
+	if !dbscSessionSkipped(r, sessionID) {
 		return false
 	}
 	slog.WarnContext(r.Context(), "DBSC rejected: client sent Secure-Session-Skipped")
@@ -69,7 +69,7 @@ func (m *Manager[T]) rejectDBSCSkipped(w http.ResponseWriter, r *http.Request) b
 // runDBSCInBand enforces device-bound session freshness. Returns true when a
 // challenge or error response was written to w.
 func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
-	if m.rejectDBSCSkipped(w, r) {
+	if m.rejectDBSCSkipped(w, r, sctx.sessdata.DBSCSessionID) {
 		return true
 	}
 
@@ -88,7 +88,7 @@ func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx 
 	}
 
 	now := time.Now()
-	jti, err := dbscproof.VerifyRefresh(respHeader, registeredDBSCKey(sctx), now)
+	jti, err := dbscproof.VerifyRefresh(respHeader, registeredDBSCKey(sctx))
 	if err != nil {
 		slog.WarnContext(r.Context(), "DBSC verification failed", "err", err)
 		m.dbscIssueInBandChallenge(w, r, sctx)

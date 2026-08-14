@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -16,8 +15,6 @@ import (
 
 const (
 	Type           = "dbsc+jwt"
-	proofMaxAge    = 5 * time.Minute
-	clockSkew      = time.Minute
 	maxCompactSize = 16 << 10
 	minRSABits     = 2048
 	maxRSABits     = 8192
@@ -70,7 +67,7 @@ type Registration struct {
 
 // VerifyRegistration verifies a registration proof using its protected JWK
 // header and returns canonical key material for later refresh proofs.
-func VerifyRegistration(compact string, now time.Time) (Registration, error) {
+func VerifyRegistration(compact string) (Registration, error) {
 	parsed, header, err := parse(compact, supportedAlgorithms())
 	if err != nil {
 		return Registration{}, err
@@ -84,11 +81,11 @@ func VerifyRegistration(compact string, now time.Time) (Registration, error) {
 	if err := validateKey(jwk, algorithm); err != nil {
 		return Registration{}, fmt.Errorf("%w: %w", ErrInvalidKey, err)
 	}
-	var claims jwt.Claims
+	var claims proofClaims
 	if err := parsed.Claims(jwk.Key, &claims); err != nil {
 		return Registration{}, fmt.Errorf("%w: verifying registration proof: %v", ErrInvalidSignature, err)
 	}
-	challenge, err := validateClaims(claims, now)
+	challenge, err := validateClaims(claims)
 	if err != nil {
 		return Registration{}, err
 	}
@@ -110,7 +107,7 @@ func VerifyRegistration(compact string, now time.Time) (Registration, error) {
 
 // VerifyRefresh verifies a refresh proof with the key established during
 // registration.
-func VerifyRefresh(compact string, key RegisteredKey, now time.Time) (string, error) {
+func VerifyRefresh(compact string, key RegisteredKey) (string, error) {
 	algorithm := jose.SignatureAlgorithm(key.Algorithm)
 	if algorithm != jose.ES256 && algorithm != jose.RS256 {
 		return "", fmt.Errorf("%w: unsupported registered algorithm %q", ErrInvalidKey, key.Algorithm)
@@ -130,11 +127,11 @@ func VerifyRefresh(compact string, key RegisteredKey, now time.Time) (string, er
 	if err := validateKey(&jwk, key.Algorithm); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrInvalidKey, err)
 	}
-	var claims jwt.Claims
+	var claims proofClaims
 	if err := parsed.Claims(jwk.Key, &claims); err != nil {
 		return "", fmt.Errorf("%w: verifying refresh proof: %v", ErrInvalidSignature, err)
 	}
-	return validateClaims(claims, now)
+	return validateClaims(claims)
 }
 
 func parse(compact string, algorithms []jose.SignatureAlgorithm) (*jwt.JSONWebToken, jose.Header, error) {
@@ -183,15 +180,13 @@ func validateKey(jwk *jose.JSONWebKey, algorithm string) error {
 	return nil
 }
 
-func validateClaims(claims jwt.Claims, now time.Time) (string, error) {
+type proofClaims struct {
+	ID string `json:"jti"`
+}
+
+func validateClaims(claims proofClaims) (string, error) {
 	if claims.ID == "" {
 		return "", fmt.Errorf("%w: missing jti claim", ErrInvalidClaims)
-	}
-	if err := claims.ValidateWithLeeway(jwt.Expected{Time: now}, clockSkew); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidClaims, err)
-	}
-	if claims.IssuedAt != nil && now.Sub(claims.IssuedAt.Time()) > proofMaxAge+clockSkew {
-		return "", fmt.Errorf("%w: proof issued too long ago", ErrInvalidClaims)
 	}
 	return claims.ID, nil
 }

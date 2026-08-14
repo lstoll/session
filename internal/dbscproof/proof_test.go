@@ -16,7 +16,6 @@ import (
 )
 
 func TestVerifyRegistrationAndRefresh(t *testing.T) {
-	now := time.Now()
 	for _, tt := range []struct {
 		name      string
 		algorithm jose.SignatureAlgorithm
@@ -27,7 +26,7 @@ func TestVerifyRegistrationAndRefresh(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			registration := signProof(t, tt.algorithm, tt.private, "registration", true, time.Time{})
-			result, err := VerifyRegistration(registration, now)
+			result, err := VerifyRegistration(registration)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -43,7 +42,7 @@ func TestVerifyRegistrationAndRefresh(t *testing.T) {
 			}
 
 			refresh := signProof(t, tt.algorithm, tt.private, "refresh", false, time.Time{})
-			challenge, err := VerifyRefresh(refresh, result.Key, now)
+			challenge, err := VerifyRefresh(refresh, result.Key)
 			if err != nil || challenge != "refresh" {
 				t.Fatalf("refresh = %q, %v", challenge, err)
 			}
@@ -53,7 +52,6 @@ func TestVerifyRegistrationAndRefresh(t *testing.T) {
 
 func TestVerifyRegistrationRejectsInvalidProofs(t *testing.T) {
 	private := newECDSAKey(t)
-	now := time.Now()
 	for _, tt := range []struct {
 		name     string
 		typ      string
@@ -65,12 +63,10 @@ func TestVerifyRegistrationRejectsInvalidProofs(t *testing.T) {
 		{name: "wrong type", typ: "JWT", jti: "challenge", embedJWK: true},
 		{name: "missing jwk", typ: Type, jti: "challenge"},
 		{name: "missing jti", typ: Type, embedJWK: true},
-		{name: "future iat", typ: Type, jti: "challenge", embedJWK: true, iat: now.Add(2 * clockSkew)},
-		{name: "stale iat", typ: Type, jti: "challenge", embedJWK: true, iat: now.Add(-proofMaxAge - 2*clockSkew)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			proof := signProofWithType(t, jose.ES256, private, tt.typ, tt.jti, tt.embedJWK, tt.iat)
-			if _, err := VerifyRegistration(proof, now); err == nil {
+			if _, err := VerifyRegistration(proof); err == nil {
 				t.Fatal("invalid proof accepted")
 			}
 		})
@@ -79,24 +75,31 @@ func TestVerifyRegistrationRejectsInvalidProofs(t *testing.T) {
 
 func TestVerifyRefreshRejectsInvalidProofs(t *testing.T) {
 	private := newECDSAKey(t)
-	now := time.Now()
-	registration, err := VerifyRegistration(signProof(t, jose.ES256, private, "registration", true, time.Time{}), now)
+	registration, err := VerifyRegistration(signProof(t, jose.ES256, private, "registration", true, time.Time{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := VerifyRefresh(signProof(t, jose.ES256, private, "refresh", true, time.Time{}), registration.Key, now); err == nil {
+	if _, err := VerifyRefresh(signProof(t, jose.ES256, private, "refresh", true, time.Time{}), registration.Key); err == nil {
 		t.Fatal("refresh proof with embedded JWK accepted")
 	}
-	if _, err := VerifyRefresh(signProof(t, jose.ES256, newECDSAKey(t), "refresh", false, time.Time{}), registration.Key, now); !errors.Is(err, ErrInvalidSignature) {
+	if _, err := VerifyRefresh(signProof(t, jose.ES256, newECDSAKey(t), "refresh", false, time.Time{}), registration.Key); !errors.Is(err, ErrInvalidSignature) {
 		t.Fatalf("wrong signature error = %v", err)
 	}
-	if _, err := VerifyRefresh("not-a-jwt", registration.Key, now); !errors.Is(err, ErrMalformedProof) {
+	if _, err := VerifyRefresh("not-a-jwt", registration.Key); !errors.Is(err, ErrMalformedProof) {
 		t.Fatalf("malformed token error = %v", err)
 	}
 	rsProof := signProof(t, jose.RS256, newRSAKey(t), "refresh", false, time.Time{})
-	if _, err := VerifyRefresh(rsProof, registration.Key, now); !errors.Is(err, ErrMalformedProof) {
+	if _, err := VerifyRefresh(rsProof, registration.Key); !errors.Is(err, ErrMalformedProof) {
 		t.Fatalf("algorithm switch error = %v", err)
+	}
+}
+
+func TestVerifyRegistrationAllowsUnspecifiedOptionalClaims(t *testing.T) {
+	private := newECDSAKey(t)
+	proof := signProof(t, jose.ES256, private, "registration", true, time.Now().Add(-24*time.Hour))
+	if _, err := VerifyRegistration(proof); err != nil {
+		t.Fatalf("optional iat affected DBSC proof validation: %v", err)
 	}
 }
 
