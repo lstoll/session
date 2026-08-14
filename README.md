@@ -61,6 +61,23 @@ Session changes must happen before the response is written or flushed. A
 mutation after the response has committed panics, since it is too late to send
 the updated cookie.
 
+## Testing
+
+The `sessiontest` package attaches a session directly to a request without
+running storage or cookie middleware:
+
+```go
+req, change := sessiontest.WithSession(t, req, sessions, SessionData{UserID: "123"})
+handler.ServeHTTP(recorder, req)
+
+if !change.Saved() {
+	t.Fatal("handler did not update the session")
+}
+```
+
+Options are available for new sessions and informational or error flash
+messages.
+
 ## DBSC
 
 KV-backed sessions can be bound to a device using Device Bound Session

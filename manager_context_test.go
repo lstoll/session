@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"lds.li/session/internal/testsession"
 )
 
 func TestManagerContext(t *testing.T) {
@@ -58,14 +60,20 @@ func TestManagerContext_wrongManagerReturnsFalse(t *testing.T) {
 	mgr1.FromContext(ctx)
 }
 
-func TestTestContext_fromContextFallback(t *testing.T) {
+func TestManagerContext_testSessionFallback(t *testing.T) {
 	mgr, err := NewKVManager[testSessionData](NewMemoryKV(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, _ := mgr.TestContext(context.Background(), testSessionData{Number: 1})
+	ctx, state := testsession.WithContext(context.Background(), mgr, testsession.Initial[testSessionData]{
+		Data: testSessionData{Number: 1},
+	})
 	sess := mgr.FromContext(ctx)
 	if sess.Get().Number != 1 {
 		t.Fatalf("got %v", sess.Get().Number)
+	}
+	sess.Set(testSessionData{Number: 2})
+	if snapshot := state.Snapshot(); !snapshot.Saved || snapshot.Data.Number != 2 {
+		t.Fatalf("snapshot = %#v", snapshot)
 	}
 }

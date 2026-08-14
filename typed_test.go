@@ -1,7 +1,6 @@
 package session
 
 import (
-	"context"
 	"testing"
 	"time"
 )
@@ -48,8 +47,14 @@ func setTestUser(s *Session[testSessionData], value string) {
 
 func TestSessionTypedData(t *testing.T) {
 	mgr := &Manager[testSessionData]{}
-	ctx, result := mgr.TestContext(context.Background(), testSessionData{User: "alice"})
-	sess := mgr.FromContext(ctx)
+	sess := &Session[testSessionData]{
+		mgr:    mgr,
+		loaded: true,
+		sessdata: persistedSession[testSessionData]{
+			Data:      testSessionData{User: "alice"},
+			CreatedAt: time.Now(),
+		},
+	}
 
 	if got := sess.Get().User; got != "alice" {
 		t.Fatalf("Get().User = %q, want alice", got)
@@ -59,15 +64,15 @@ func TestSessionTypedData(t *testing.T) {
 	data.User = "bob"
 	data.Number++
 	sess.Set(data)
-	if got := result.Result(); got.User != "bob" || got.Number != 1 {
+	if got := sess.Get(); got.User != "bob" || got.Number != 1 {
 		t.Fatalf("Set result = %#v", got)
 	}
-	if !result.Saved() {
+	if sess.state != sessionDirty {
 		t.Fatal("Set did not mark session for saving")
 	}
 
 	sess.Set(testSessionData{Value: "replacement"})
-	if got := result.Result(); got != (testSessionData{Value: "replacement"}) {
+	if got := sess.Get(); got != (testSessionData{Value: "replacement"}) {
 		t.Fatalf("replacement result = %#v", got)
 	}
 }

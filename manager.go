@@ -15,15 +15,57 @@ import (
 	"time"
 
 	"lds.li/session/internal/dbscproof"
+	"lds.li/session/internal/testsession"
 )
 
 // FromContext returns the Session this Manager stored in ctx.
 // It panics if this Manager did not install a session in ctx.
 func (m *Manager[T]) FromContext(ctx context.Context) *Session[T] {
 	sess, ok := ctx.Value(sessionContextKey[T]{manager: m}).(*Session[T])
+	if ok {
+		return sess
+	}
+
+	testState, ok := testsession.FromContext[T](ctx, m)
 	if !ok {
 		panic("no session in context for this Manager")
 	}
+	if existing := testState.Session(); existing != nil {
+		return existing.(*Session[T])
+	}
+
+	initial := testState.Initial()
+	sess = &Session[T]{
+		mgr:      m,
+		isNew:    initial.IsNew,
+		loaded:   true,
+		sessdata: persistedSession[T]{Data: initial.Data, CreatedAt: time.Now()},
+	}
+	switch initial.Flash {
+	case testsession.FlashMessage:
+		sess.sessdata.Flash = flashLevelInfo
+	case testsession.FlashError:
+		sess.sessdata.Flash = flashLevelError
+	}
+	sess.sessdata.FlashMsg = initial.FlashMessage
+	testState.Bind(sess, func() testsession.Snapshot[T] {
+		flash := testsession.FlashNone
+		switch sess.sessdata.Flash {
+		case flashLevelInfo:
+			flash = testsession.FlashMessage
+		case flashLevelError:
+			flash = testsession.FlashError
+		}
+		return testsession.Snapshot[T]{
+			Data:         sess.sessdata.Data,
+			Saved:        sess.state == sessionDirty,
+			Deleted:      sess.state == sessionDeleted,
+			Reset:        sess.rotate,
+			IsNew:        sess.isNew,
+			Flash:        flash,
+			FlashMessage: sess.sessdata.FlashMsg,
+		}
+	})
 	return sess
 }
 
