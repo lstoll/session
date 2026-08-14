@@ -93,6 +93,7 @@ type managerOpts[T any] struct {
 	ErrorHandler func(http.ResponseWriter, *http.Request, error)
 	Onload       func(T) T
 	CookieOpts   *SessionCookieOpts
+	Codec        Codec
 
 	DBSCRefreshInterval  time.Duration
 	DBSCRegistrationPath string
@@ -116,6 +117,8 @@ type CookieManagerOpts[T any] struct {
 	Onload func(T) T
 	// Cookie settings.
 	CookieOpts *SessionCookieOpts
+	// Codec selects the persisted session encoding. Nil uses JSONCodec.
+	Codec Codec
 }
 
 // KVManagerOpts configures options specifically for the KV-based session manager
@@ -136,6 +139,8 @@ type KVManagerOpts[T any] struct {
 	Onload func(T) T
 	// Cookie settings.
 	CookieOpts *SessionCookieOpts
+	// Codec selects the persisted session encoding. Nil uses JSONCodec.
+	Codec Codec
 	// SessionIDAuthenticator authenticates the opaque session ID cookie. When
 	// set, invalid cookies are rejected before they can cause a KV lookup.
 	SessionIDAuthenticator Authenticator
@@ -177,9 +182,13 @@ func NewCookieManager[T any](aead cipher.AEAD, opts *CookieManagerOpts[T]) (*Man
 	if aead == nil {
 		return nil, errors.New("AEAD is required")
 	}
+	selectedCodec, err := resolveCodec[T](normalized.Codec)
+	if err != nil {
+		return nil, err
+	}
 	m := &Manager[T]{
 		opts:  normalized,
-		codec: &gobCodec[T]{},
+		codec: selectedCodec,
 	}
 
 	// Set cookie options
@@ -210,9 +219,13 @@ func NewKVManager[T any](kv KV, opts *KVManagerOpts[T]) (*Manager[T], error) {
 		return nil, errors.New("KV store is required")
 	}
 	normalized, sessionIDAuthenticator, eagerLoad := normalizeKVManagerOpts(opts)
+	selectedCodec, err := resolveCodec[T](normalized.Codec)
+	if err != nil {
+		return nil, err
+	}
 	m := &Manager[T]{
 		opts:  normalized,
-		codec: &gobCodec[T]{},
+		codec: selectedCodec,
 	}
 
 	if err := validateDBSCOpts(m.opts); err != nil {
@@ -255,6 +268,7 @@ func normalizeCookieManagerOpts[T any](opts *CookieManagerOpts[T]) managerOpts[T
 		ErrorHandler: opts.ErrorHandler,
 		Onload:       opts.Onload,
 		CookieOpts:   opts.CookieOpts,
+		Codec:        opts.Codec,
 	}
 	if normalized.IdleTimeout == 0 && normalized.MaxLifetime == 0 {
 		normalized.IdleTimeout = DefaultIdleTimeout
@@ -272,6 +286,7 @@ func normalizeKVManagerOpts[T any](opts *KVManagerOpts[T]) (managerOpts[T], Auth
 		ErrorHandler:         opts.ErrorHandler,
 		Onload:               opts.Onload,
 		CookieOpts:           opts.CookieOpts,
+		Codec:                opts.Codec,
 		DBSCRefreshInterval:  opts.DBSCRefreshInterval,
 		DBSCRegistrationPath: opts.DBSCRegistrationPath,
 		DBSCRefreshPath:      opts.DBSCRefreshPath,

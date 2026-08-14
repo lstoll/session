@@ -11,7 +11,7 @@ go get lds.li/session
 
 ```go
 type SessionData struct {
-	UserID string
+	UserID string `json:"user_id"`
 }
 
 sessions, err := session.NewKVManager[SessionData](session.NewMemoryKV(), nil)
@@ -34,6 +34,10 @@ handler := sessions.Wrap(mux)
 deployments normally provide a shared `KV` implementation. The
 [`sqlkv`](https://pkg.go.dev/lds.li/session/sqlkv) package provides one for
 `database/sql`.
+
+Sessions use JSON encoding by default. Set `Codec: session.GobCodec{}` to use
+gob instead. All instances sharing a store must use the same codec, and changing
+it invalidates existing sessions.
 
 Cookie-backed sessions are available when self-contained storage is useful:
 

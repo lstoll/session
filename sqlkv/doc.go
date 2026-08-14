@@ -36,7 +36,7 @@
 //
 //	// Configure a typed session manager to use this KV store
 //	type SessionData struct {
-//		UserID string
+//		UserID string `json:"user_id"`
 //	}
 //	manager, err := session.NewKVManager[SessionData](kv, nil)
 //	if err != nil {

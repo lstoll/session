@@ -17,8 +17,8 @@ const dbscChallengeTTL = 5 * time.Minute
 const dbscMaxRecentChallenges = 4
 
 type dbscChallenge struct {
-	Value     string
-	ExpiresAt time.Time
+	Value     string    `json:"value"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 func registeredDBSCKey[T any](sctx *Session[T]) dbscproof.RegisteredKey {

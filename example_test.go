@@ -9,7 +9,7 @@ import (
 )
 
 type exampleSessionData struct {
-	UserID string
+	UserID string `json:"user_id"`
 }
 
 func ExampleManager() {
