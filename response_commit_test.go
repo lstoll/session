@@ -20,11 +20,14 @@ func TestSessionMutationAfterResponseCommitPanics(t *testing.T) {
 		}},
 		{name: "Delete", mutate: func(s *Session[testSessionData], _ http.ResponseWriter, _ *http.Request) { s.Delete() }},
 		{name: "Reset", mutate: func(s *Session[testSessionData], _ http.ResponseWriter, _ *http.Request) { s.Reset() }},
-		{name: "FlashMessage", prepare: func(s *Session[testSessionData]) { s.SetFlashMessage("notice") }, mutate: func(s *Session[testSessionData], _ http.ResponseWriter, _ *http.Request) {
-			s.FlashMessage()
+		{name: "TakeFlashes", prepare: func(s *Session[testSessionData]) {
+			s.AddFlash(Flash{Level: FlashLevelInfo, Message: "notice"})
+		}, mutate: func(s *Session[testSessionData], _ http.ResponseWriter, _ *http.Request) {
+			s.TakeFlashes()
 		}},
-		{name: "SetFlashError", mutate: func(s *Session[testSessionData], _ http.ResponseWriter, _ *http.Request) { s.SetFlashError("error") }},
-		{name: "SetFlashMessage", mutate: func(s *Session[testSessionData], _ http.ResponseWriter, _ *http.Request) { s.SetFlashMessage("notice") }},
+		{name: "AddFlash", mutate: func(s *Session[testSessionData], _ http.ResponseWriter, _ *http.Request) {
+			s.AddFlash(Flash{Level: FlashLevelError, Message: "error"})
+		}},
 		{name: "InitiateDBSCRegistration", mutate: func(s *Session[testSessionData], w http.ResponseWriter, r *http.Request) {
 			s.InitiateDBSCRegistration(w, r)
 		}},
@@ -76,8 +79,8 @@ func TestSessionReadsAfterResponseCommit(t *testing.T) {
 		if got := sess.Get().Bootstrap; got != "value" {
 			t.Fatalf("Get after commit = %q", got)
 		}
-		if sess.HasFlash() || sess.FlashIsError() || sess.FlashMessage() != "" {
-			t.Fatal("empty flash reads after commit returned data")
+		if flashes := sess.TakeFlashes(); flashes != nil {
+			t.Fatalf("TakeFlashes after commit = %#v, want nil", flashes)
 		}
 		_ = sess.IsNew()
 		_ = sess.IsDeviceBound()

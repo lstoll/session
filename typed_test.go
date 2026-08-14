@@ -28,14 +28,51 @@ func TestSessionDeleteThenSetStartsFreshSession(t *testing.T) {
 	}
 }
 
-func TestFlashMessageClearsFlashState(t *testing.T) {
-	sess := &Session[testSessionData]{}
-	sess.SetFlashError("try again")
-	if got := sess.FlashMessage(); got != "try again" {
-		t.Fatalf("FlashMessage = %q, want try again", got)
+func TestSessionFlashQueue(t *testing.T) {
+	sess := &Session[testSessionData]{loaded: true}
+	want := []Flash{
+		{Level: FlashLevelError, Message: "try again"},
+		{Level: FlashLevel("success"), Message: ""},
 	}
-	if sess.HasFlash() {
-		t.Fatal("HasFlash remained true after consuming message")
+	for _, flash := range want {
+		sess.AddFlash(flash)
+	}
+
+	got := sess.TakeFlashes()
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("TakeFlashes() = %#v, want %#v", got, want)
+	}
+	if remaining := sess.TakeFlashes(); remaining != nil {
+		t.Fatalf("second TakeFlashes() = %#v, want nil", remaining)
+	}
+	if sess.state != sessionDirty {
+		t.Fatalf("state = %v, want dirty", sess.state)
+	}
+}
+
+func TestTakeFlashesOnEmptySessionDoesNotMarkDirty(t *testing.T) {
+	sess := &Session[testSessionData]{loaded: true}
+	if got := sess.TakeFlashes(); got != nil {
+		t.Fatalf("TakeFlashes() = %#v, want nil", got)
+	}
+	if sess.state != sessionClean {
+		t.Fatalf("state = %v, want clean", sess.state)
+	}
+}
+
+func TestAddFlashAfterDeleteStartsFreshSession(t *testing.T) {
+	sess := &Session[testSessionData]{
+		loaded:   true,
+		sessdata: persistedSession[testSessionData]{CreatedAt: time.Now().Add(-time.Hour)},
+	}
+	sess.Delete()
+	sess.AddFlash(Flash{Level: FlashLevelInfo, Message: "welcome"})
+
+	if sess.state != sessionDirty || !sess.rotate {
+		t.Fatalf("state = %v, rotate = %v; want dirty, true", sess.state, sess.rotate)
+	}
+	if sess.sessdata.CreatedAt.IsZero() {
+		t.Fatal("AddFlash after Delete left CreatedAt unset")
 	}
 }
 

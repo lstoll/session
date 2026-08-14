@@ -10,6 +10,26 @@ type sessionContextKey[T any] struct {
 	manager *Manager[T]
 }
 
+// FlashLevel identifies how an application should present a flash message.
+// Applications may define additional levels.
+type FlashLevel string
+
+const (
+	// FlashLevelInfo identifies an informational flash.
+	FlashLevelInfo FlashLevel = "info"
+	// FlashLevelError identifies an error flash.
+	FlashLevelError FlashLevel = "error"
+)
+
+// Flash is a message that remains in the session until consumed by
+// TakeFlashes.
+type Flash struct {
+	// Level controls how the application presents the message.
+	Level FlashLevel `json:"level,omitempty"`
+	// Message is the content presented to the user.
+	Message string `json:"message"`
+}
+
 // dbscServeConfigKey is used by Manager.Wrap to pass registration path into
 // InitiateDBSCRegistration.
 type dbscServeConfigKey struct{}
@@ -139,64 +159,37 @@ func (s *Session[T]) Reset() {
 	s.isNew = true
 }
 
-// HasFlash indicates if there is a flash message.
-func (s *Session[T]) HasFlash() bool {
+// TakeFlashes returns and removes all queued flash messages. It returns nil and
+// does not mutate the session when no flashes are queued.
+func (s *Session[T]) TakeFlashes() []Flash {
 	s.ensureLoaded()
 	if s.aborted {
-		return false
+		return nil
 	}
-	return s.sessdata.Flash != flashLevelNone
-}
-
-// FlashIsError indicates that the flash message is an error.
-func (s *Session[T]) FlashIsError() bool {
-	s.ensureLoaded()
-	if s.aborted {
-		return false
+	if len(s.sessdata.Flashes) == 0 {
+		return nil
 	}
-	return s.sessdata.Flash == flashLevelError
-}
+	s.assertMutable("TakeFlashes")
 
-// FlashMessage returns the current flash message and clears it.
-func (s *Session[T]) FlashMessage() string {
-	s.ensureLoaded()
-	if s.aborted {
-		return ""
-	}
-
-	flash := s.sessdata.FlashMsg
-	if flash == "" {
-		return ""
-	}
-	s.assertMutable("FlashMessage")
-
-	// Clear the flash, it's been read
-	s.sessdata.FlashMsg = ""
-	s.sessdata.Flash = flashLevelNone
+	flashes := append([]Flash(nil), s.sessdata.Flashes...)
+	s.sessdata.Flashes = nil
 	s.state = sessionDirty
-
-	return flash
+	return flashes
 }
 
-func (s *Session[T]) SetFlashError(message string) {
+// AddFlash appends a flash message and marks the session for saving.
+func (s *Session[T]) AddFlash(flash Flash) {
 	s.ensureLoaded()
 	if s.aborted {
 		return
 	}
-	s.assertMutable("SetFlashError")
-	s.sessdata.FlashMsg = message
-	s.sessdata.Flash = flashLevelError
-	s.state = sessionDirty
-}
+	s.assertMutable("AddFlash")
 
-func (s *Session[T]) SetFlashMessage(message string) {
-	s.ensureLoaded()
-	if s.aborted {
-		return
+	if s.state == sessionDeleted {
+		s.sessdata.CreatedAt = time.Now()
+		s.rotate = true
 	}
-	s.assertMutable("SetFlashMessage")
-	s.sessdata.FlashMsg = message
-	s.sessdata.Flash = flashLevelInfo
+	s.sessdata.Flashes = append(s.sessdata.Flashes, flash)
 	s.state = sessionDirty
 }
 

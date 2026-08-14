@@ -41,29 +41,27 @@ func (m *Manager[T]) FromContext(ctx context.Context) *Session[T] {
 		loaded:   true,
 		sessdata: persistedSession[T]{Data: initial.Data, CreatedAt: time.Now()},
 	}
-	switch initial.Flash {
-	case testsession.FlashMessage:
-		sess.sessdata.Flash = flashLevelInfo
-	case testsession.FlashError:
-		sess.sessdata.Flash = flashLevelError
+	for _, flash := range initial.Flashes {
+		sess.sessdata.Flashes = append(sess.sessdata.Flashes, Flash{
+			Level:   FlashLevel(flash.Level),
+			Message: flash.Message,
+		})
 	}
-	sess.sessdata.FlashMsg = initial.FlashMessage
 	testState.Bind(sess, func() testsession.Snapshot[T] {
-		flash := testsession.FlashNone
-		switch sess.sessdata.Flash {
-		case flashLevelInfo:
-			flash = testsession.FlashMessage
-		case flashLevelError:
-			flash = testsession.FlashError
+		flashes := make([]testsession.Flash, len(sess.sessdata.Flashes))
+		for i, flash := range sess.sessdata.Flashes {
+			flashes[i] = testsession.Flash{
+				Level:   string(flash.Level),
+				Message: flash.Message,
+			}
 		}
 		return testsession.Snapshot[T]{
-			Data:         sess.sessdata.Data,
-			Saved:        sess.state == sessionDirty,
-			Deleted:      sess.state == sessionDeleted,
-			Reset:        sess.rotate,
-			IsNew:        sess.isNew,
-			Flash:        flash,
-			FlashMessage: sess.sessdata.FlashMsg,
+			Data:    sess.sessdata.Data,
+			Saved:   sess.state == sessionDirty,
+			Deleted: sess.state == sessionDeleted,
+			Reset:   sess.rotate,
+			IsNew:   sess.isNew,
+			Flashes: flashes,
 		}
 	})
 	return sess

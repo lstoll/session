@@ -9,32 +9,27 @@ type contextKey[T any] struct {
 	manager any
 }
 
-// Flash identifies the flash state of an attached test session.
-type Flash uint8
-
-const (
-	FlashNone Flash = iota
-	FlashMessage
-	FlashError
-)
+// Flash is the internal representation of a public session flash.
+type Flash struct {
+	Level   string
+	Message string
+}
 
 // Initial describes a session attached by sessiontest.
 type Initial[T any] struct {
-	Data         T
-	IsNew        bool
-	Flash        Flash
-	FlashMessage string
+	Data    T
+	IsNew   bool
+	Flashes []Flash
 }
 
 // Snapshot describes the current state of an attached session.
 type Snapshot[T any] struct {
-	Data         T
-	Saved        bool
-	Deleted      bool
-	Reset        bool
-	IsNew        bool
-	Flash        Flash
-	FlashMessage string
+	Data    T
+	Saved   bool
+	Deleted bool
+	Reset   bool
+	IsNew   bool
+	Flashes []Flash
 }
 
 // State connects an attached request to the session created by Manager.
@@ -75,9 +70,8 @@ func (s *State[T]) Snapshot() Snapshot[T] {
 		return s.snapshot()
 	}
 	return Snapshot[T]{
-		Data:         s.initial.Data,
-		IsNew:        s.initial.IsNew,
-		Flash:        s.initial.Flash,
-		FlashMessage: s.initial.FlashMessage,
+		Data:    s.initial.Data,
+		IsNew:   s.initial.IsNew,
+		Flashes: append([]Flash(nil), s.initial.Flashes...),
 	}
 }

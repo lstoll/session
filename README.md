@@ -75,8 +75,7 @@ if !change.Saved() {
 }
 ```
 
-Options are available for new sessions and informational or error flash
-messages.
+Options are available for new sessions and initial flash messages.
 
 ## DBSC
 

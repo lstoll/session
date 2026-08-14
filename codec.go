@@ -41,22 +41,13 @@ type jsonCodec[T any] struct{}
 // gobCodec is a codec that uses Go's gob encoding.
 type gobCodec[T any] struct{}
 
-type flashLevel string
-
-const (
-	flashLevelNone  flashLevel = ""
-	flashLevelInfo  flashLevel = "info"
-	flashLevelError flashLevel = "error"
-)
-
 // persistedSession is the private persistence envelope shared by the JSON and
 // gob implementations. Keep field changes compatible with both encodings.
 type persistedSession[T any] struct {
-	Data      T          `json:"data"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at,omitzero"`
-	Flash     flashLevel `json:"flash,omitempty"`
-	FlashMsg  string     `json:"flash_message,omitempty"`
+	Data      T         `json:"data"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
+	Flashes   []Flash   `json:"flashes,omitempty"`
 
 	// --- DBSC Fields ---
 	// DBSCAlgorithm and DBSCPublicJWK identify the algorithm and single public

@@ -11,9 +11,8 @@ import (
 )
 
 type config struct {
-	isNew        bool
-	flash        testsession.Flash
-	flashMessage string
+	isNew   bool
+	flashes []session.Flash
 }
 
 // Option configures a session attached by WithSession. Only options provided
@@ -26,19 +25,26 @@ type optionFunc func(*config)
 
 func (f optionFunc) apply(config *config) { f(config) }
 
-// WithFlashMessage attaches an informational flash message.
-func WithFlashMessage(message string) Option {
+// WithFlash adds a flash to the attached session.
+func WithFlash(flash session.Flash) Option {
 	return optionFunc(func(config *config) {
-		config.flash = testsession.FlashMessage
-		config.flashMessage = message
+		config.flashes = append(config.flashes, flash)
 	})
 }
 
-// WithFlashError attaches an error flash message.
+// WithFlashMessage adds an informational flash message to the attached session.
+func WithFlashMessage(message string) Option {
+	return WithFlash(session.Flash{
+		Level:   session.FlashLevelInfo,
+		Message: message,
+	})
+}
+
+// WithFlashError adds an error flash message to the attached session.
 func WithFlashError(message string) Option {
-	return optionFunc(func(config *config) {
-		config.flash = testsession.FlashError
-		config.flashMessage = message
+	return WithFlash(session.Flash{
+		Level:   session.FlashLevelError,
+		Message: message,
 	})
 }
 
@@ -70,16 +76,18 @@ func (c *Change[T]) Reset() bool { return c.state.Snapshot().Reset }
 // IsNew reports the session's current IsNew state.
 func (c *Change[T]) IsNew() bool { return c.state.Snapshot().IsNew }
 
-// HasFlash reports whether the session currently contains a flash message.
-func (c *Change[T]) HasFlash() bool { return c.state.Snapshot().Flash != testsession.FlashNone }
-
-// FlashIsError reports whether the current flash message is an error.
-func (c *Change[T]) FlashIsError() bool {
-	return c.state.Snapshot().Flash == testsession.FlashError
+// Flashes returns a copy of the session's current flash queue.
+func (c *Change[T]) Flashes() []session.Flash {
+	snapshot := c.state.Snapshot()
+	flashes := make([]session.Flash, len(snapshot.Flashes))
+	for i, flash := range snapshot.Flashes {
+		flashes[i] = session.Flash{
+			Level:   session.FlashLevel(flash.Level),
+			Message: flash.Message,
+		}
+	}
+	return flashes
 }
-
-// FlashMessage returns the current flash message without consuming it.
-func (c *Change[T]) FlashMessage() string { return c.state.Snapshot().FlashMessage }
 
 // WithSession attaches a session to request for a unit test. The returned
 // request must be passed to the code under test. Change reflects mutations made
@@ -111,11 +119,17 @@ func WithSession[T any](
 		option.apply(&config)
 	}
 
+	flashes := make([]testsession.Flash, len(config.flashes))
+	for i, flash := range config.flashes {
+		flashes[i] = testsession.Flash{
+			Level:   string(flash.Level),
+			Message: flash.Message,
+		}
+	}
 	ctx, state := testsession.WithContext(request.Context(), manager, testsession.Initial[T]{
-		Data:         data,
-		IsNew:        config.isNew,
-		Flash:        config.flash,
-		FlashMessage: config.flashMessage,
+		Data:    data,
+		IsNew:   config.isNew,
+		Flashes: flashes,
 	})
 	return request.WithContext(ctx), &Change[T]{state: state}
 }

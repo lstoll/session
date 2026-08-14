@@ -30,19 +30,22 @@ func TestWithSessionTracksDataAndFlash(t *testing.T) {
 		manager,
 		sessionData{UserID: "alice"},
 		sessiontest.WithFlashError("sign in again"),
+		sessiontest.WithFlash(session.Flash{Level: "success", Message: "welcome back"}),
 	)
 
 	if change.IsNew() {
 		t.Fatal("attached session should represent an existing session by default")
 	}
-	if !change.HasFlash() || !change.FlashIsError() || change.FlashMessage() != "sign in again" {
-		t.Fatalf("initial flash = %q, error %v", change.FlashMessage(), change.FlashIsError())
+	if got := change.Flashes(); len(got) != 2 ||
+		got[0] != (session.Flash{Level: session.FlashLevelError, Message: "sign in again"}) ||
+		got[1] != (session.Flash{Level: "success", Message: "welcome back"}) {
+		t.Fatalf("initial flashes = %#v", got)
 	}
 
 	handler := http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
 		sess := manager.FromContext(request.Context())
-		if got := sess.FlashMessage(); got != "sign in again" {
-			t.Fatalf("FlashMessage() = %q", got)
+		if got := sess.TakeFlashes(); len(got) != 2 || got[0].Message != "sign in again" || got[1].Message != "welcome back" {
+			t.Fatalf("TakeFlashes() = %#v", got)
 		}
 		data := sess.Get()
 		data.UserID = "bob"
@@ -56,8 +59,8 @@ func TestWithSessionTracksDataAndFlash(t *testing.T) {
 	if got := change.Data().UserID; got != "bob" {
 		t.Fatalf("Data().UserID = %q", got)
 	}
-	if change.HasFlash() || change.FlashMessage() != "" {
-		t.Fatalf("consumed flash remains: %q", change.FlashMessage())
+	if got := change.Flashes(); len(got) != 0 {
+		t.Fatalf("consumed flashes remain: %#v", got)
 	}
 }
 
@@ -83,7 +86,8 @@ func TestWithSessionTracksDeleteAndReset(t *testing.T) {
 			sessiontest.AsNewSession(),
 			sessiontest.WithFlashMessage("welcome"),
 		)
-		if !change.IsNew() || !change.HasFlash() || change.FlashIsError() {
+		flashes := change.Flashes()
+		if !change.IsNew() || len(flashes) != 1 || flashes[0].Level != session.FlashLevelInfo {
 			t.Fatal("new informational-flash session was not attached")
 		}
 		manager.FromContext(request.Context()).Reset()

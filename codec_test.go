@@ -10,11 +10,13 @@ import (
 func TestCodecRoundTrip(t *testing.T) {
 	now := time.Date(2026, time.August, 14, 12, 30, 0, 0, time.UTC)
 	want := persistedSession[testSessionData]{
-		Data:                      testSessionData{User: "alice", Value: "value0"},
-		CreatedAt:                 now,
-		UpdatedAt:                 now.Add(time.Minute),
-		Flash:                     flashLevelInfo,
-		FlashMsg:                  "hello",
+		Data:      testSessionData{User: "alice", Value: "value0"},
+		CreatedAt: now,
+		UpdatedAt: now.Add(time.Minute),
+		Flashes: []Flash{
+			{Level: FlashLevelInfo, Message: "hello"},
+			{Level: FlashLevel("success"), Message: "done"},
+		},
 		DBSCAlgorithm:             "ES256",
 		DBSCPublicJWK:             []byte(`{"kty":"EC"}`),
 		DBSCSessionID:             "dbsc-session",
