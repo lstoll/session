@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -90,8 +92,7 @@ type CookieManagerOpts[T any] struct {
 	// Onload is called when a session is retrieved from storage.
 	Onload func(T) T
 	// Cookie settings.
-	CookieOpts         *SessionCookieOpts
-	DisableCompression bool
+	CookieOpts *SessionCookieOpts
 }
 
 // KVManagerOpts configures options specifically for the KV-based session manager
@@ -140,7 +141,7 @@ type KVManagerOpts[T any] struct {
 // prefixes nonces for conventional AEADs; an AEAD with a zero nonce size, such
 // as cipher.NewGCMWithRandomNonce, manages its own nonce framing.
 func NewCookieManager[T any](aead cipher.AEAD, opts *CookieManagerOpts[T]) (*Manager[T], error) {
-	normalized, compressionDisabled := normalizeCookieManagerOpts(opts)
+	normalized := normalizeCookieManagerOpts(opts)
 	if aead == nil {
 		return nil, errors.New("AEAD is required")
 	}
@@ -163,10 +164,9 @@ func NewCookieManager[T any](aead cipher.AEAD, opts *CookieManagerOpts[T]) (*Man
 	}
 
 	m.store = &cookieStore[T]{
-		aead:                aead,
-		codec:               m.codec,
-		compressionDisabled: compressionDisabled,
-		cookieSettings:      m.cookieSettings,
+		aead:           aead,
+		codec:          m.codec,
+		cookieSettings: m.cookieSettings,
 	}
 
 	return m, nil
@@ -210,9 +210,9 @@ func NewKVManager[T any](kv KV, opts *KVManagerOpts[T]) (*Manager[T], error) {
 	return m, nil
 }
 
-func normalizeCookieManagerOpts[T any](opts *CookieManagerOpts[T]) (managerOpts[T], bool) {
+func normalizeCookieManagerOpts[T any](opts *CookieManagerOpts[T]) managerOpts[T] {
 	if opts == nil {
-		return managerOpts[T]{IdleTimeout: DefaultIdleTimeout}, false
+		return managerOpts[T]{IdleTimeout: DefaultIdleTimeout}
 	}
 	normalized := managerOpts[T]{
 		MaxLifetime:  opts.MaxLifetime,
@@ -224,7 +224,7 @@ func normalizeCookieManagerOpts[T any](opts *CookieManagerOpts[T]) (managerOpts[
 	if normalized.IdleTimeout == 0 && normalized.MaxLifetime == 0 {
 		normalized.IdleTimeout = DefaultIdleTimeout
 	}
-	return normalized, opts.DisableCompression
+	return normalized
 }
 
 func normalizeKVManagerOpts[T any](opts *KVManagerOpts[T]) (managerOpts[T], Authenticator, bool) {
@@ -249,21 +249,41 @@ func normalizeKVManagerOpts[T any](opts *KVManagerOpts[T]) (managerOpts[T], Auth
 }
 
 func validateDBSCOpts[T any](opts managerOpts[T]) error {
+	if opts.DBSCRefreshInterval < 0 {
+		return errors.New("DBSCRefreshInterval must not be negative")
+	}
 	if opts.DBSCRefreshInterval == 0 {
 		return nil
 	}
-	if opts.DBSCOrigin == "" {
-		return errors.New("DBSCOrigin is required when DBSCRefreshInterval is set")
+	origin, err := url.Parse(opts.DBSCOrigin)
+	if err != nil || origin.Host == "" || origin.Scheme != "https" ||
+		origin.User != nil || (origin.Path != "" && origin.Path != "/") || origin.RawQuery != "" || origin.Fragment != "" {
+		return errors.New("DBSCOrigin must be an HTTPS origin without a path, query, fragment, or userinfo")
+	}
+	for name, path := range map[string]string{
+		"DBSCRegistrationPath": opts.DBSCRegistrationPath,
+		"DBSCRefreshPath":      opts.DBSCRefreshPath,
+	} {
+		if path != "" && (!strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#") || !isASCIIPrintable(path)) {
+			return fmt.Errorf("%s must be an absolute URL path without a query or fragment", name)
+		}
 	}
 	return nil
 }
 
+func isASCIIPrintable(s string) bool {
+	for i := range len(s) {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // Constants for cookie format in the Manager
 const (
-	managerCookieMagic           = "EU1"
-	managerCompressedCookieMagic = "EC1"
-	managerCompressThreshold     = 512
-	managerMaxCookieSize         = 4096
+	managerCookieMagic   = "EU1"
+	managerMaxCookieSize = 4096
 )
 
 var managerCookieValueEncoding = base64.RawURLEncoding
@@ -480,6 +500,7 @@ func (m *Manager[T]) calculateExpiry(sessdata persistedSession[T]) time.Time {
 // Helper functions for tracking KV-mode session ID in context
 type managerSessionIDCtxKey[T any] struct{ manager *Manager[T] }
 
+//nolint:unused // Called through generic store implementations; golangci-lint does not resolve the instantiation.
 func getManagerSessionIDFromContext[T any](r *http.Request, m *Manager[T]) string {
 	val := r.Context().Value(managerSessionIDCtxKey[T]{manager: m})
 	if val == nil {
@@ -617,6 +638,7 @@ func (m *Manager[T]) dbscCookieCredentialAttributes() string {
 
 // dbscWriteInstructions sets headers, writes the JSON body, and logs warnings.
 func (m *Manager[T]) dbscWriteInstructions(w http.ResponseWriter, r *http.Request, body []byte) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(body); err != nil {
@@ -725,8 +747,8 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 		return true
 	}
 
-	sessionID := stripSFString(r.Header.Get("Sec-Secure-Session-Id"))
-	if sessionID == "" || sessionID != sctx.sessdata.DBSCSessionID {
+	sessionID, ok := parseSFString(r.Header.Get("Sec-Secure-Session-Id"))
+	if !ok || sessionID == "" || sessionID != sctx.sessdata.DBSCSessionID {
 		http.Error(w, "invalid Sec-Secure-Session-Id", http.StatusUnauthorized)
 		return true
 	}
@@ -784,7 +806,7 @@ func (m *Manager[T]) dbscIssueInBandChallenge(w http.ResponseWriter, r *http.Req
 		m.handleErr(w, r, err)
 		return
 	}
-	w.Header().Set("Secure-Session-Challenge", `"`+nonce+`";id="`+sctx.sessdata.DBSCSessionID+`"`)
+	w.Header().Set("Secure-Session-Challenge", sfString(nonce)+`;id=`+sfString(sctx.sessdata.DBSCSessionID))
 	w.WriteHeader(http.StatusForbidden)
 }
 
@@ -794,15 +816,11 @@ func (m *Manager[T]) dbscIssueRefreshChallenge(w http.ResponseWriter, r *http.Re
 		m.handleErr(w, r, err)
 		return true
 	}
-	w.Header().Set("Secure-Session-Challenge", `"`+nonce+`";id="`+sctx.sessdata.DBSCSessionID+`"`)
+	w.Header().Set("Secure-Session-Challenge", sfString(nonce)+`;id=`+sfString(sctx.sessdata.DBSCSessionID))
 	w.WriteHeader(http.StatusForbidden)
 	return true
 }
 
 func dbscSessionSkipped(r *http.Request) bool {
-	v := r.Header.Get("Sec-Secure-Session-Skipped")
-	if v == "" {
-		v = r.Header.Get("Sec-Session-Skipped")
-	}
-	return v == "?1" || v == "1" || v == "true"
+	return r.Header.Get("Secure-Session-Skipped") != ""
 }

@@ -97,23 +97,54 @@ func hasPendingDBSCRegistrationChallenge[T any](sctx *Session[T], now time.Time)
 }
 
 func dbscRegistrationHeader(path, challenge string) string {
-	return `(` + dbscproof.RegistrationAlgorithms() + `);path="` + path + `";challenge="` + challenge + `"`
+	return `(` + dbscproof.RegistrationAlgorithms() + `);path=` + sfString(path) + `;challenge=` + sfString(challenge)
 }
 
-// stripSFString returns the inner string from an RFC 9651 sf-string value.
-func stripSFString(s string) string {
+func sfString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
+}
+
+// parseSFString parses an RFC 9651 string and ignores any parameters, as the
+// DBSC header definitions require.
+func parseSFString(s string) (string, bool) {
 	s = strings.TrimSpace(s)
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return s[1 : len(s)-1]
+	if len(s) < 2 || s[0] != '"' {
+		return "", false
 	}
-	return s
+	var value strings.Builder
+	for i := 1; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '"':
+			rest := strings.TrimSpace(s[i+1:])
+			return value.String(), rest == "" || strings.HasPrefix(rest, ";")
+		case c == '\\':
+			i++
+			if i >= len(s) || (s[i] != '\\' && s[i] != '"') {
+				return "", false
+			}
+			value.WriteByte(s[i])
+		case c < 0x20 || c > 0x7e:
+			return "", false
+		default:
+			value.WriteByte(c)
+		}
+	}
+	return "", false
 }
 
-// dbscSessionResponseHeader reads Secure-Session-Response (or legacy
-// Sec-Session-Response) from a request.
+// dbscSessionResponseHeader reads Secure-Session-Response from a request.
 func dbscSessionResponseHeader(r *http.Request) string {
-	if v := r.Header.Get("Secure-Session-Response"); v != "" {
-		return stripSFString(v)
+	raw := strings.TrimSpace(r.Header.Get("Secure-Session-Response"))
+	value, ok := parseSFString(raw)
+	if !ok {
+		// Chrome's current implementation sends the compact JWT directly even
+		// though the Editor's Draft models this header as an sf-string.
+		if strings.Count(raw, ".") == 2 && !strings.ContainsAny(raw, " \t\r\n") {
+			return raw
+		}
+		return ""
 	}
-	return stripSFString(r.Header.Get("Sec-Session-Response"))
+	return value
 }

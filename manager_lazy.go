@@ -55,13 +55,13 @@ func (m *Manager[T]) ensureSessionLoaded(w http.ResponseWriter, r *http.Request,
 }
 
 // rejectDBSCSkipped rejects requests where the client could not complete DBSC.
-// Sec-Secure-Session-Skipped is a diagnostic header from the browser; it must
+// Secure-Session-Skipped is a diagnostic header from the browser; it must
 // not bypass device binding. Returns true when a 401 was written.
 func (m *Manager[T]) rejectDBSCSkipped(w http.ResponseWriter, r *http.Request) bool {
 	if !dbscSessionSkipped(r) {
 		return false
 	}
-	slog.WarnContext(r.Context(), "DBSC rejected: client sent Sec-Secure-Session-Skipped")
+	slog.WarnContext(r.Context(), "DBSC rejected: client sent Secure-Session-Skipped")
 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	return true
 }
@@ -76,7 +76,7 @@ func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx 
 	boundCookie, err := r.Cookie(m.dbscBoundCookieName())
 	isBoundCookieValid := err == nil && boundCookie.Value != "" && boundCookie.Value == sctx.sessdata.DBSCCurrentCookieID
 
-	isExpired := !sctx.sessdata.DBSCExpiration.IsZero() && time.Now().After(sctx.sessdata.DBSCExpiration)
+	isExpired := sctx.sessdata.DBSCExpiration.IsZero() || time.Now().After(sctx.sessdata.DBSCExpiration)
 	if isBoundCookieValid && !isExpired {
 		return false
 	}

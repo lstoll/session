@@ -32,6 +32,7 @@ func (s *kvStore[T]) sessionIDAuthenticatorInput(id string) []byte {
 	return []byte(s.cookieSettings.Name + "\x00" + id)
 }
 
+//nolint:unused // Used by generic store methods; golangci-lint does not resolve the instantiation.
 func (s *kvStore[T]) authenticateSessionID(id string) (string, error) {
 	if s.authenticator == nil {
 		return id, nil
@@ -83,6 +84,7 @@ func (s *kvStore[T]) peekSessionID(r *http.Request) bool {
 	return true
 }
 
+//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
 func (s *kvStore[T]) load(r *http.Request) (persistedSession[T], []byte, error) {
 	cookie, err := r.Cookie(s.cookieSettings.Name)
 	if err != nil {
@@ -123,6 +125,7 @@ func (s *kvStore[T]) load(r *http.Request) (persistedSession[T], []byte, error) 
 	return sess, data, nil
 }
 
+//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
 func (s *kvStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, sess persistedSession[T]) error {
 	// Generate or get session ID
 	sessionID := getManagerSessionIDFromContext(r, s.m)
@@ -148,6 +151,7 @@ func (s *kvStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt time
 	return s.writeSessionCookie(w, expiresAt, sessionID)
 }
 
+//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
 func (s *kvStore[T]) delete(r *http.Request) error {
 	sessionID := getManagerSessionIDFromContext(r, s.m)
 	if sessionID == "" {
@@ -173,6 +177,7 @@ func (s *kvStore[T]) delete(r *http.Request) error {
 	return nil
 }
 
+//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
 func (s *kvStore[T]) touch(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
 	// Get session ID
 	sessionID := getManagerSessionIDFromContext(r, s.m)
@@ -197,6 +202,7 @@ func (s *kvStore[T]) touch(w http.ResponseWriter, r *http.Request, expiresAt tim
 	return s.writeSessionCookie(w, expiresAt, sessionID)
 }
 
+//nolint:unused // Used by generic store methods; golangci-lint does not resolve the instantiation.
 func (s *kvStore[T]) writeSessionCookie(w http.ResponseWriter, expiresAt time.Time, sessionID string) error {
 	cookieValue, err := s.authenticateSessionID(sessionID)
 	if err != nil {

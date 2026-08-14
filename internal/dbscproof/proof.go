@@ -68,8 +68,8 @@ type Registration struct {
 	Challenge string
 }
 
-// VerifyRegistration verifies a registration proof using its protected,
-// embedded JWK and returns canonical key material for later refresh proofs.
+// VerifyRegistration verifies a registration proof using its protected JWK
+// header and returns canonical key material for later refresh proofs.
 func VerifyRegistration(compact string, now time.Time) (Registration, error) {
 	parsed, header, err := parse(compact, supportedAlgorithms())
 	if err != nil {
@@ -109,7 +109,7 @@ func VerifyRegistration(compact string, now time.Time) (Registration, error) {
 }
 
 // VerifyRefresh verifies a refresh proof with the key established during
-// registration. Refresh proofs must not carry a JWK.
+// registration.
 func VerifyRefresh(compact string, key RegisteredKey, now time.Time) (string, error) {
 	algorithm := jose.SignatureAlgorithm(key.Algorithm)
 	if algorithm != jose.ES256 && algorithm != jose.RS256 {

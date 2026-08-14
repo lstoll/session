@@ -8,9 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,25 +36,21 @@ func generateJWTSignature(t *testing.T, privKey *ecdsa.PrivateKey, header, paylo
 	return base64.RawURLEncoding.EncodeToString(sigBytes)
 }
 
-func ecCoordBytes(n *big.Int, size int) []byte {
-	b := n.Bytes()
-	if len(b) > size {
-		panic("coordinate exceeds field")
-	}
-	out := make([]byte, size)
-	copy(out[size-len(b):], b)
-	return out
-}
-
 // es256JWKJSON returns a JSON object (for embedding in a JWT header) for tests only.
 func es256JWKJSON(t *testing.T, pub *ecdsa.PublicKey) string {
 	t.Helper()
 	if pub.Curve != elliptic.P256() {
 		t.Fatal("P-256 only")
 	}
-	byteLen := (pub.Curve.Params().BitSize + 7) / 8
-	x := ecCoordBytes(pub.X, byteLen)
-	y := ecCoordBytes(pub.Y, byteLen)
+	encoded, err := pub.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) != 65 || encoded[0] != 4 {
+		t.Fatal("unexpected P-256 public key encoding")
+	}
+	x := encoded[1:33]
+	y := encoded[33:]
 	return `{"kty":"EC","crv":"P-256","alg":"ES256","x":"` +
 		base64.RawURLEncoding.EncodeToString(x) + `","y":"` +
 		base64.RawURLEncoding.EncodeToString(y) + `"}`
@@ -88,8 +82,8 @@ func TestDBSC(t *testing.T) {
 		t.Run("skipped_header_rejected", func(t *testing.T) {
 			testDBSCSkippedRejected(t)
 		})
-		t.Run("registration_chrome_jwk", func(t *testing.T) {
-			testDBSCRegistrationChromeJWK(t)
+		t.Run("registration_editor_draft_jwk", func(t *testing.T) {
+			testDBSCRegistrationEditorDraftJWK(t)
 		})
 		t.Run("registration_stale_iat_rejected", func(t *testing.T) {
 			testDBSCRegistrationStaleIATRejected(t)
@@ -116,7 +110,7 @@ func TestDBSCRS256RegistrationAndRefresh(t *testing.T) {
 
 	reqRegistration := newTestRequest(http.MethodPost, "/register", nil)
 	addCookies(reqRegistration, cookies)
-	reqRegistration.Header.Set("Secure-Session-Response", dbscJOSEProofJWT(t, jose.RS256, private, registrationChallenge, true))
+	reqRegistration.Header.Set("Secure-Session-Response", sfString(dbscJOSEProofJWT(t, jose.RS256, private, registrationChallenge, "")))
 	rrRegistration := httptest.NewRecorder()
 	handler.ServeHTTP(rrRegistration, reqRegistration)
 	if rrRegistration.Code != http.StatusOK {
@@ -143,7 +137,7 @@ func TestDBSCRS256RegistrationAndRefresh(t *testing.T) {
 	reqRefresh := newTestRequest(http.MethodPost, "/dbsc/refresh", nil)
 	addCookies(reqRefresh, cookies)
 	reqRefresh.Header.Set("Sec-Secure-Session-Id", `"`+sessionID+`"`)
-	reqRefresh.Header.Set("Secure-Session-Response", dbscJOSEProofJWT(t, jose.RS256, private, refreshChallenge, false))
+	reqRefresh.Header.Set("Secure-Session-Response", sfString(dbscJOSEProofJWT(t, jose.RS256, private, refreshChallenge, sessionID)))
 	rrRefresh := httptest.NewRecorder()
 	handler.ServeHTTP(rrRefresh, reqRefresh)
 	if rrRefresh.Code != http.StatusOK {
@@ -151,18 +145,9 @@ func TestDBSCRS256RegistrationAndRefresh(t *testing.T) {
 	}
 }
 
-func dbscJOSEProofJWT(t *testing.T, algorithm jose.SignatureAlgorithm, private any, challenge string, embedJWK bool) string {
+func dbscJOSEProofJWT(t *testing.T, algorithm jose.SignatureAlgorithm, private any, challenge, subject string) string {
 	t.Helper()
-	opts := (&jose.SignerOptions{EmbedJWK: embedJWK}).WithType("dbsc+jwt")
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: algorithm, Key: private}, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	compact, err := josejwt.Signed(signer).Claims(josejwt.Claims{ID: challenge}).Serialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return compact
+	return dbscJOSEProofJWTAt(t, algorithm, private, challenge, subject, time.Now())
 }
 
 func TestDBSCRecentRefreshChallenges(t *testing.T) {
@@ -193,6 +178,57 @@ func TestDBSCRecentRefreshChallenges(t *testing.T) {
 	}
 	if err := verifyDBSCRefreshChallenge(sctx, second, now); err != nil {
 		t.Fatalf("consuming first challenge invalidated second: %v", err)
+	}
+}
+
+func TestDBSCStructuredStrings(t *testing.T) {
+	for _, tt := range []struct {
+		input string
+		want  string
+		ok    bool
+	}{
+		{input: `"proof"`, want: "proof", ok: true},
+		{input: `"proof";ignored=?1`, want: "proof", ok: true},
+		{input: `"a\\\"b"`, want: `a\"b`, ok: true},
+		{input: "proof"},
+		{input: `"unterminated`},
+		{input: `"bad\q"`},
+	} {
+		got, ok := parseSFString(tt.input)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("parseSFString(%q) = (%q, %v), want (%q, %v)", tt.input, got, ok, tt.want, tt.ok)
+		}
+	}
+	if got := sfString(`a\"b`); got != `"a\\\"b"` {
+		t.Fatalf("sfString escaped value = %q", got)
+	}
+}
+
+func TestDBSCOptionsValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		opts managerOpts[struct{}]
+	}{
+		{name: "negative interval", opts: managerOpts[struct{}]{DBSCRefreshInterval: -time.Second}},
+		{name: "missing origin", opts: managerOpts[struct{}]{DBSCRefreshInterval: time.Minute}},
+		{name: "insecure origin", opts: managerOpts[struct{}]{DBSCRefreshInterval: time.Minute, DBSCOrigin: "http://example.com"}},
+		{name: "origin path", opts: managerOpts[struct{}]{DBSCRefreshInterval: time.Minute, DBSCOrigin: "https://example.com/path"}},
+		{name: "relative registration path", opts: managerOpts[struct{}]{DBSCRefreshInterval: time.Minute, DBSCOrigin: "https://example.com", DBSCRegistrationPath: "register"}},
+		{name: "refresh query", opts: managerOpts[struct{}]{DBSCRefreshInterval: time.Minute, DBSCOrigin: "https://example.com", DBSCRefreshPath: "/refresh?x=1"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateDBSCOpts(tt.opts); err == nil {
+				t.Fatal("invalid DBSC options accepted")
+			}
+		})
+	}
+	if err := validateDBSCOpts(managerOpts[struct{}]{
+		DBSCRefreshInterval:  time.Minute,
+		DBSCOrigin:           "https://example.com",
+		DBSCRegistrationPath: "/register",
+		DBSCRefreshPath:      "/refresh",
+	}); err != nil {
+		t.Fatalf("valid DBSC options rejected: %v", err)
 	}
 }
 
@@ -243,7 +279,7 @@ func TestDBSCRegistrationAndRefreshCommitOnce(t *testing.T) {
 	reqProof := newTestRequest(http.MethodPost, "/dbsc/refresh", nil)
 	addCookies(reqProof, cookies)
 	reqProof.Header.Set("Sec-Secure-Session-Id", `"`+dbscSessionID+`"`)
-	reqProof.Header.Set("Secure-Session-Response", dbscProofJWT(t, privKey, nonce, false))
+	reqProof.Header.Set("Secure-Session-Response", sfString(dbscProofJWT(t, privKey, nonce, dbscSessionID)))
 	rrProof := httptest.NewRecorder()
 	handler.ServeHTTP(rrProof, reqProof)
 	if rrProof.Code != http.StatusOK {
@@ -258,7 +294,7 @@ func TestDBSCInvalidInBandProofIssuesNewChallenge(t *testing.T) {
 	refreshInterval := time.Millisecond
 	kv := &memoryKV{contents: make(map[string]kvItem)}
 	_, handler, privKey, _ := setupDBSCHandler(t, kv, refreshInterval)
-	_, _, cookies := completeDBSCRegistration(t, handler, privKey, nil)
+	_, dbscSessionID, cookies := completeDBSCRegistration(t, handler, privKey, nil)
 	time.Sleep(refreshInterval + time.Millisecond)
 
 	reqChallenge := newTestRequest(http.MethodGet, "/protected", nil)
@@ -273,7 +309,7 @@ func TestDBSCInvalidInBandProofIssuesNewChallenge(t *testing.T) {
 	}
 	reqProof := newTestRequest(http.MethodGet, "/protected", nil)
 	addCookies(reqProof, cookies)
-	reqProof.Header.Set("Secure-Session-Response", dbscProofJWT(t, wrongKey, nonce, false))
+	reqProof.Header.Set("Secure-Session-Response", sfString(dbscProofJWT(t, wrongKey, nonce, dbscSessionID)))
 	rrProof := httptest.NewRecorder()
 	handler.ServeHTTP(rrProof, reqProof)
 	if rrProof.Code != http.StatusForbidden {
@@ -350,10 +386,10 @@ func testDBSCRegistrationCrossSiteRejected(t *testing.T) {
 	regChallenge := challengeFromSecureSessionRegistration(t, rr0.Header().Get("Secure-Session-Registration"))
 	cookies := extractCookies(rr0)
 
-	regJWT := dbscProofJWT(t, privKey, regChallenge, true)
+	regJWT := dbscProofJWT(t, privKey, regChallenge, "")
 	req1 := newTestRequest(http.MethodPost, "/register", nil)
 	addCookies(req1, cookies)
-	req1.Header.Set("Secure-Session-Response", regJWT)
+	req1.Header.Set("Secure-Session-Response", sfString(regJWT))
 	req1.Header.Set("Sec-Fetch-Site", "cross-site")
 	rr1 := httptest.NewRecorder()
 	handler.ServeHTTP(rr1, req1)
@@ -373,10 +409,10 @@ func testDBSCRegistrationStaleIATRejected(t *testing.T) {
 	regChallenge := challengeFromSecureSessionRegistration(t, rr0.Header().Get("Secure-Session-Registration"))
 	cookies := extractCookies(rr0)
 
-	regJWT := dbscProofJWTWithIAT(t, privKey, regChallenge, time.Now().Add(-10*time.Minute), true)
+	regJWT := dbscProofJWTWithIAT(t, privKey, regChallenge, "", time.Now().Add(-10*time.Minute))
 	req1 := newTestRequest(http.MethodPost, "/register", nil)
 	addCookies(req1, cookies)
-	req1.Header.Set("Secure-Session-Response", regJWT)
+	req1.Header.Set("Secure-Session-Response", sfString(regJWT))
 	rr1 := httptest.NewRecorder()
 	handler.ServeHTTP(rr1, req1)
 	if rr1.Code != http.StatusUnauthorized {
@@ -384,7 +420,7 @@ func testDBSCRegistrationStaleIATRejected(t *testing.T) {
 	}
 }
 
-func testDBSCRegistrationChromeJWK(t *testing.T) {
+func testDBSCRegistrationEditorDraftJWK(t *testing.T) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}
 	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute)
@@ -398,11 +434,11 @@ func testDBSCRegistrationChromeJWK(t *testing.T) {
 	regJWT := dbscProofJWTJTIOOnly(t, privKey, regChallenge, true, false)
 	req1 := newTestRequest(http.MethodPost, "/register", nil)
 	addCookies(req1, cookies)
-	req1.Header.Set("Secure-Session-Response", regJWT)
+	req1.Header.Set("Secure-Session-Response", sfString(regJWT))
 	rr1 := httptest.NewRecorder()
 	handler.ServeHTTP(rr1, req1)
 	if rr1.Code != http.StatusOK {
-		t.Fatalf("registration with chrome-style jwk: got %v %s", rr1.Code, rr1.Body.String())
+		t.Fatalf("Editor Draft registration: got %v %s", rr1.Code, rr1.Body.String())
 	}
 }
 
@@ -429,11 +465,11 @@ func testDBSCRefreshEndpoint(t *testing.T, refreshInterval time.Duration) {
 
 	cookies = mergeCookies(cookies, extractCookies(rrRefresh))
 
-	refreshJWT := dbscProofJWT(t, privKey, challengeNonce, false)
+	refreshJWT := dbscProofJWT(t, privKey, challengeNonce, dbscSessionID)
 	reqRefresh2 := newTestRequest(http.MethodPost, "/dbsc/refresh", nil)
 	addCookies(reqRefresh2, cookies)
 	reqRefresh2.Header.Set("Sec-Secure-Session-Id", `"`+dbscSessionID+`"`)
-	reqRefresh2.Header.Set("Secure-Session-Response", `"`+refreshJWT+`"`)
+	reqRefresh2.Header.Set("Secure-Session-Response", sfString(refreshJWT))
 	rrRefresh2 := httptest.NewRecorder()
 	handler.ServeHTTP(rrRefresh2, reqRefresh2)
 	if rrRefresh2.Code != http.StatusOK {
@@ -468,11 +504,11 @@ func testDBSCSkippedRejected(t *testing.T) {
 	t.Run("in_band", func(t *testing.T) {
 		req := newTestRequest(http.MethodGet, "/protected", nil)
 		addCookies(req, cookies)
-		req.Header.Set("Sec-Secure-Session-Skipped", "?1")
+		req.Header.Set("Secure-Session-Skipped", `quota_exceeded;session_identifier="`+dbscSessionID+`"`)
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 		if rr.Code != http.StatusUnauthorized {
-			t.Fatalf("in-band with Sec-Secure-Session-Skipped: got %v want 401", rr.Code)
+			t.Fatalf("in-band with Secure-Session-Skipped: got %v want 401", rr.Code)
 		}
 	})
 
@@ -480,11 +516,11 @@ func testDBSCSkippedRejected(t *testing.T) {
 		req := newTestRequest(http.MethodPost, "/dbsc/refresh", nil)
 		addCookies(req, cookies)
 		req.Header.Set("Sec-Secure-Session-Id", `"`+dbscSessionID+`"`)
-		req.Header.Set("Sec-Secure-Session-Skipped", "?1")
+		req.Header.Set("Secure-Session-Skipped", `unreachable;session_identifier="`+dbscSessionID+`"`)
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 		if rr.Code != http.StatusUnauthorized {
-			t.Fatalf("refresh with Sec-Secure-Session-Skipped: got %v want 401", rr.Code)
+			t.Fatalf("refresh with Secure-Session-Skipped: got %v want 401", rr.Code)
 		}
 	})
 }
@@ -524,10 +560,10 @@ func testDBSCInBandChallenge(t *testing.T, refreshInterval time.Duration) {
 
 	cookies = mergeCookies(cookies, extractCookies(rr2))
 
-	refreshJWT := dbscProofJWT(t, privKey, challengeNonce, false)
+	refreshJWT := dbscProofJWT(t, privKey, challengeNonce, dbscSessionID)
 	req3 := newTestRequest(http.MethodGet, "/protected", nil)
 	addCookies(req3, cookies)
-	req3.Header.Set("Secure-Session-Response", refreshJWT)
+	req3.Header.Set("Secure-Session-Response", sfString(refreshJWT))
 	rr3 := httptest.NewRecorder()
 	handler.ServeHTTP(rr3, req3)
 	if rr3.Code != http.StatusOK {
@@ -596,10 +632,10 @@ func completeDBSCRegistration(t *testing.T, handler http.Handler, privKey *ecdsa
 	regChallenge = challengeFromSecureSessionRegistration(t, reg)
 	cookies = mergeCookies(sessionCookies, extractCookies(rr0))
 
-	regJWT := dbscProofJWT(t, privKey, regChallenge, true)
+	regJWT := dbscProofJWT(t, privKey, regChallenge, "")
 	req1 := newTestRequest(http.MethodPost, "/register", nil)
 	addCookies(req1, cookies)
-	req1.Header.Set("Secure-Session-Response", regJWT)
+	req1.Header.Set("Secure-Session-Response", sfString(regJWT))
 	rr1 := httptest.NewRecorder()
 	handler.ServeHTTP(rr1, req1)
 	if rr1.Code != http.StatusOK {
@@ -617,39 +653,34 @@ func completeDBSCRegistration(t *testing.T, handler http.Handler, privKey *ecdsa
 	return regChallenge, id, cookies
 }
 
-func dbscProofJWT(t *testing.T, privKey *ecdsa.PrivateKey, jti string, withJWK bool) string {
-	return dbscProofJWTWithIAT(t, privKey, jti, time.Now(), withJWK)
+func dbscProofJWT(t *testing.T, privKey *ecdsa.PrivateKey, jti, subject string) string {
+	return dbscProofJWTWithIAT(t, privKey, jti, subject, time.Now())
 }
 
-func dbscProofJWTWithIAT(t *testing.T, privKey *ecdsa.PrivateKey, jti string, iat time.Time, withJWK bool) string {
-	return dbscProofJWTWithJWKAlgAndIAT(t, privKey, jti, iat, withJWK, true)
-}
-
-// dbscProofJWTWithJWKAlg builds a DBSC proof; chromeStyleJWK omits alg from the embedded JWK.
-func dbscProofJWTWithJWKAlg(t *testing.T, privKey *ecdsa.PrivateKey, jti string, withJWK, jwkIncludesAlg bool) string {
-	return dbscProofJWTWithJWKAlgAndIAT(t, privKey, jti, time.Now(), withJWK, jwkIncludesAlg)
-}
-
-func dbscProofJWTWithJWKAlgAndIAT(t *testing.T, privKey *ecdsa.PrivateKey, jti string, iat time.Time, withJWK, jwkIncludesAlg bool) string {
+func dbscProofJWTWithIAT(t *testing.T, privKey *ecdsa.PrivateKey, jti, subject string, iat time.Time) string {
 	t.Helper()
-	var headerJSON string
-	if withJWK {
-		jwk := es256JWKJSON(t, &privKey.PublicKey)
-		if !jwkIncludesAlg {
-			jwk = strings.Replace(jwk, `"alg":"ES256",`, "", 1)
-		}
-		headerJSON = `{"alg":"ES256","typ":"dbsc+jwt","jwk":` + jwk + `}`
-	} else {
-		headerJSON = `{"alg":"ES256","typ":"dbsc+jwt"}`
-	}
-	payloadJSON := `{"jti":"` + jti + `","iat":` + fmt.Sprintf("%d", iat.Unix()) + `}`
-	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(headerJSON))
-	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payloadJSON))
-	sigB64 := generateJWTSignature(t, privKey, headerB64, payloadB64)
-	return headerB64 + "." + payloadB64 + "." + sigB64
+	return dbscJOSEProofJWTAt(t, jose.ES256, privKey, jti, subject, iat)
 }
 
-// dbscProofJWTJTIOOnly builds a Chrome-style proof with only jti (no iat/exp).
+func dbscJOSEProofJWTAt(t *testing.T, algorithm jose.SignatureAlgorithm, private any, challenge, subject string, issuedAt time.Time) string {
+	t.Helper()
+	opts := (&jose.SignerOptions{EmbedJWK: subject == ""}).WithType("dbsc+jwt")
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: algorithm, Key: private}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := josejwt.Claims{ID: challenge}
+	if !issuedAt.IsZero() {
+		claims.IssuedAt = josejwt.NewNumericDate(issuedAt)
+	}
+	compact, err := josejwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compact
+}
+
+// dbscProofJWTJTIOOnly builds a current Editor's Draft proof with only jti.
 func dbscProofJWTJTIOOnly(t *testing.T, privKey *ecdsa.PrivateKey, jti string, withJWK, jwkIncludesAlg bool) string {
 	t.Helper()
 	var headerJSON string
