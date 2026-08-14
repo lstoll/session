@@ -15,7 +15,10 @@ var ErrAuthenticationFailed = errors.New("authentication failed")
 // Authenticator authenticates opaque values such as session IDs.
 // Implementations must be safe for concurrent use.
 type Authenticator interface {
+	// Authenticate returns an authenticator for message. The caller owns the
+	// returned byte slice.
 	Authenticate(message []byte) ([]byte, error)
+	// Verify returns nil when authenticator is valid for message.
 	Verify(message, authenticator []byte) error
 }
 

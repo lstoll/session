@@ -57,6 +57,32 @@ func TestMemoryKVConcurrentExpiredReads(t *testing.T) {
 	wg.Wait()
 }
 
+func TestMemoryKVCopiesValues(t *testing.T) {
+	kv := NewMemoryKV()
+	input := []byte("original")
+	if err := kv.Set(context.Background(), "key", time.Now().Add(time.Hour), input); err != nil {
+		t.Fatal(err)
+	}
+	input[0] = 'X'
+
+	first, found, err := kv.Get(context.Background(), "key")
+	if err != nil || !found {
+		t.Fatalf("first Get = found %v, err %v", found, err)
+	}
+	if string(first) != "original" {
+		t.Fatalf("stored value changed through Set input: %q", first)
+	}
+	first[0] = 'Y'
+
+	second, found, err := kv.Get(context.Background(), "key")
+	if err != nil || !found {
+		t.Fatalf("second Get = found %v, err %v", found, err)
+	}
+	if string(second) != "original" {
+		t.Fatalf("stored value changed through Get result: %q", second)
+	}
+}
+
 func (c *countingKV) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	c.mu.Lock()
 	c.gets++

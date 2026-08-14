@@ -16,6 +16,8 @@ type memoryKV struct {
 	contentsMu sync.RWMutex
 }
 
+// NewMemoryKV returns a concurrency-safe in-memory KV store. Its contents are
+// local to the process and are lost when the process exits.
 func NewMemoryKV() KV {
 	return &memoryKV{contents: make(map[string]kvItem)}
 }
@@ -32,7 +34,7 @@ func (m *memoryKV) Get(_ context.Context, key string) (_ []byte, found bool, _ e
 		delete(m.contents, key)
 		return nil, false, nil
 	}
-	return v.data, true, nil
+	return append([]byte(nil), v.data...), true, nil
 }
 
 func (m *memoryKV) Set(_ context.Context, key string, expiresAt time.Time, value []byte) error {
@@ -40,7 +42,7 @@ func (m *memoryKV) Set(_ context.Context, key string, expiresAt time.Time, value
 	defer m.contentsMu.Unlock()
 
 	m.contents[key] = kvItem{
-		data:      value,
+		data:      append([]byte(nil), value...),
 		expiresAt: expiresAt,
 	}
 	return nil

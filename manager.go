@@ -43,18 +43,22 @@ type Manager[T any] struct {
 	lazyLoad       bool
 }
 
-var DefaultIdleTimeout = 24 * time.Hour
+// DefaultIdleTimeout is used when neither manager lifetime option is set.
+const DefaultIdleTimeout = 24 * time.Hour
 
-// SessionCookieOpts configures cookie behavior for sessions
+// SessionCookieOpts configures the cookie emitted by a session manager.
 type SessionCookieOpts struct {
 	// Name must be a valid HTTP cookie name. Names beginning with __Host- must
 	// use Path "/" and a secure cookie; names beginning with __Secure- must use
 	// a secure cookie.
 	Name string
 	// Path must be an absolute cookie path beginning with "/".
-	Path     string
+	Path string
+	// Insecure permits sending the cookie over HTTP. It should only be used for
+	// local development without TLS.
 	Insecure bool
-	Persist  bool
+	// Persist adds Max-Age so the browser may retain the cookie across restarts.
+	Persist bool
 }
 
 // newCookie creates a cookie with the configured options
@@ -67,9 +71,20 @@ func (c *SessionCookieOpts) newCookie(exp time.Time) *http.Cookie {
 		SameSite: http.SameSiteLaxMode,
 	}
 	if c.Persist {
-		hc.MaxAge = int(time.Until(exp).Seconds())
+		hc.MaxAge = managerCookieMaxAge(time.Until(exp))
 	}
 	return hc
+}
+
+func managerCookieMaxAge(remaining time.Duration) int {
+	if remaining <= 0 {
+		return -1
+	}
+	seconds := remaining / time.Second
+	if remaining%time.Second != 0 {
+		seconds++
+	}
+	return int(seconds)
 }
 
 type managerOpts[T any] struct {
@@ -679,23 +694,12 @@ func (m *Manager[T]) setDBSCBoundCookie(w http.ResponseWriter, sctx *Session[T])
 	}
 	switch {
 	case !sctx.sessdata.DBSCExpiration.IsZero():
-		hc.MaxAge = dbscCookieMaxAge(time.Until(sctx.sessdata.DBSCExpiration))
+		hc.MaxAge = managerCookieMaxAge(time.Until(sctx.sessdata.DBSCExpiration))
 	case m.opts.DBSCRefreshInterval > 0:
-		hc.MaxAge = dbscCookieMaxAge(m.opts.DBSCRefreshInterval)
+		hc.MaxAge = managerCookieMaxAge(m.opts.DBSCRefreshInterval)
 	}
 	managerRemoveCookieByName(w, hc.Name)
 	return managerSetCookie(w, hc)
-}
-
-func dbscCookieMaxAge(remaining time.Duration) int {
-	if remaining <= 0 {
-		return -1
-	}
-	seconds := remaining / time.Second
-	if remaining%time.Second != 0 {
-		seconds++
-	}
-	return int(seconds)
 }
 
 func (m *Manager[T]) deleteDBSCBoundCookie(w http.ResponseWriter) error {

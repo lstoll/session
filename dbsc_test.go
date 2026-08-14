@@ -257,7 +257,7 @@ func TestDBSCSkippedSessionMatching(t *testing.T) {
 	}
 }
 
-func TestDBSCCookieMaxAgeRoundsUp(t *testing.T) {
+func TestManagerCookieMaxAgeRoundsUp(t *testing.T) {
 	for _, tt := range []struct {
 		remaining time.Duration
 		want      int
@@ -268,8 +268,8 @@ func TestDBSCCookieMaxAgeRoundsUp(t *testing.T) {
 		{remaining: time.Second, want: 1},
 		{remaining: time.Second + time.Nanosecond, want: 2},
 	} {
-		if got := dbscCookieMaxAge(tt.remaining); got != tt.want {
-			t.Errorf("dbscCookieMaxAge(%v) = %d, want %d", tt.remaining, got, tt.want)
+		if got := managerCookieMaxAge(tt.remaining); got != tt.want {
+			t.Errorf("managerCookieMaxAge(%v) = %d, want %d", tt.remaining, got, tt.want)
 		}
 	}
 }

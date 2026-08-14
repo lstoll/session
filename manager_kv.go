@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// KV stores encoded server-side sessions. Implementations must be safe for
+// concurrent use, must not retain the value passed to Set, and must return a
+// caller-owned value from Get. Entries at or past expiresAt must be reported as
+// not found.
 type KV interface {
 	Get(_ context.Context, key string) (_ []byte, found bool, _ error)
 	Set(_ context.Context, key string, expiresAt time.Time, value []byte) error
