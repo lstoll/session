@@ -61,3 +61,24 @@ func TestHookRWRemembersRejectedCommit(t *testing.T) {
 		t.Fatalf("response body = %q, want empty", recorder.Body.String())
 	}
 }
+
+func TestHookRWInformationalResponseDoesNotCommit(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	hookCalls := 0
+	h := &hookRW{
+		ResponseWriter: recorder,
+		hook: func(http.ResponseWriter) bool {
+			hookCalls++
+			return true
+		},
+	}
+
+	h.WriteHeader(http.StatusEarlyHints)
+	if h.responseCommitted() || hookCalls != 0 {
+		t.Fatalf("103 response committed session: committed=%v, hook calls=%d", h.responseCommitted(), hookCalls)
+	}
+	h.WriteHeader(http.StatusOK)
+	if !h.responseCommitted() || hookCalls != 1 {
+		t.Fatalf("final response did not commit session: committed=%v, hook calls=%d", h.responseCommitted(), hookCalls)
+	}
+}

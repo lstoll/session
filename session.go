@@ -60,6 +60,12 @@ func (s *Session[T]) ensureLoaded() {
 	s.mgr.ensureSessionLoaded(s.reqW, s.reqR, s)
 }
 
+func (s *Session[T]) assertMutable(operation string) {
+	if writer, ok := s.reqW.(interface{ responseCommitted() bool }); ok && writer.responseCommitted() {
+		panic("session: " + operation + " called after response committed")
+	}
+}
+
 // Get returns the application data stored in the session.
 //
 // The returned value is a copy of T. If T contains reference types such as
@@ -81,6 +87,7 @@ func (s *Session[T]) Set(data T) {
 	if s.aborted {
 		return
 	}
+	s.assertMutable("Set")
 
 	if s.state == sessionDeleted {
 		s.sessdata.CreatedAt = time.Now()
@@ -93,6 +100,10 @@ func (s *Session[T]) Set(data T) {
 // Delete marks the session for deletion at the end of the request.
 func (s *Session[T]) Delete() {
 	s.ensureLoaded()
+	if s.aborted {
+		return
+	}
+	s.assertMutable("Delete")
 
 	s.loadedData = nil
 	s.sessdata = persistedSession[T]{}
@@ -104,6 +115,10 @@ func (s *Session[T]) Delete() {
 // Reset rotates the session ID to avoid session fixation.
 func (s *Session[T]) Reset() {
 	s.ensureLoaded()
+	if s.aborted {
+		return
+	}
+	s.assertMutable("Reset")
 
 	s.loadedData = nil
 	if s.sessdata.CreatedAt.IsZero() {
@@ -143,6 +158,7 @@ func (s *Session[T]) FlashMessage() string {
 	if flash == "" {
 		return ""
 	}
+	s.assertMutable("FlashMessage")
 
 	// Clear the flash, it's been read
 	s.sessdata.FlashMsg = ""
@@ -157,6 +173,7 @@ func (s *Session[T]) SetFlashError(message string) {
 	if s.aborted {
 		return
 	}
+	s.assertMutable("SetFlashError")
 	s.sessdata.FlashMsg = message
 	s.sessdata.Flash = flashLevelError
 	s.state = sessionDirty
@@ -167,6 +184,7 @@ func (s *Session[T]) SetFlashMessage(message string) {
 	if s.aborted {
 		return
 	}
+	s.assertMutable("SetFlashMessage")
 	s.sessdata.FlashMsg = message
 	s.sessdata.Flash = flashLevelInfo
 	s.state = sessionDirty
@@ -195,6 +213,7 @@ func (s *Session[T]) InitiateDBSCRegistration(w http.ResponseWriter, r *http.Req
 	if s.aborted {
 		return
 	}
+	s.assertMutable("InitiateDBSCRegistration")
 
 	cfg, ok := r.Context().Value(dbscServeConfigKey{}).(dbscServeConfig[T])
 	if !ok || cfg.RegistrationPath == "" || cfg.GenerateRegistrationChallenge == nil {

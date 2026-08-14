@@ -24,6 +24,7 @@ type hookRW struct {
 	hook       func(http.ResponseWriter) bool
 	hookOnce   sync.Once
 	allowWrite bool
+	committed  bool
 	aborted    func() bool
 }
 
@@ -31,7 +32,10 @@ func (h *hookRW) beforeWrite() error {
 	if h.aborted != nil && h.aborted() {
 		return http.ErrAbortHandler
 	}
-	h.hookOnce.Do(func() { h.allowWrite = h.hook(h.ResponseWriter) })
+	h.hookOnce.Do(func() {
+		h.committed = true
+		h.allowWrite = h.hook(h.ResponseWriter)
+	})
 	if !h.allowWrite {
 		return errors.New("request interrupted by hook")
 	}
@@ -46,10 +50,20 @@ func (h *hookRW) Write(b []byte) (int, error) {
 }
 
 func (h *hookRW) WriteHeader(statusCode int) {
+	// Informational responses other than protocol switching do not commit the
+	// final response headers in net/http, so they must not commit the session.
+	if statusCode >= 100 && statusCode <= 199 && statusCode != http.StatusSwitchingProtocols {
+		h.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
 	if h.beforeWrite() != nil {
 		return
 	}
 	h.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (h *hookRW) responseCommitted() bool {
+	return h.committed
 }
 
 func (h *hookRW) Unwrap() http.ResponseWriter {
