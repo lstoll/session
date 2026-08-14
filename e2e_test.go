@@ -11,8 +11,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
-
-	"golang.org/x/crypto/chacha20poly1305"
 )
 
 func TestE2E(t *testing.T) {
@@ -30,7 +28,7 @@ func TestE2E(t *testing.T) {
 	}{
 		{name: "AES-GCM", aead: newTestAESGCM(t, false)},
 		{name: "AES-GCM random nonce", aead: newTestAESGCM(t, true)},
-		{name: "XChaCha20-Poly1305", aead: newTestXChaCha20Poly1305(t)},
+		{name: "AES-GCM 24-byte nonce", aead: newTestAESGCMWithNonceSize(t, 24)},
 	} {
 		t.Run("Cookie Manager/"+tt.name, func(t *testing.T) {
 			mgr, err := NewCookieManager[testSessionData](tt.aead, nil)
@@ -206,13 +204,17 @@ func newTestAESGCM(t *testing.T, randomNonce bool) cipher.AEAD {
 	return prim
 }
 
-func newTestXChaCha20Poly1305(t *testing.T) cipher.AEAD {
+func newTestAESGCMWithNonceSize(t *testing.T, nonceSize int) cipher.AEAD {
 	t.Helper()
-	key := make([]byte, chacha20poly1305.KeySize)
+	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		t.Fatal(err)
 	}
-	prim, err := chacha20poly1305.NewX(key)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prim, err := cipher.NewGCMWithNonceSize(block, nonceSize)
 	if err != nil {
 		t.Fatal(err)
 	}

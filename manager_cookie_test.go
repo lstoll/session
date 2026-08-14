@@ -24,7 +24,7 @@ func TestAEADFraming(t *testing.T) {
 	}{
 		{name: "AES-GCM", aead: newTestAESGCM(t, false)},
 		{name: "AES-GCM random nonce", aead: newTestAESGCM(t, true)},
-		{name: "XChaCha20-Poly1305", aead: newTestXChaCha20Poly1305(t)},
+		{name: "AES-GCM 24-byte nonce", aead: newTestAESGCMWithNonceSize(t, 24)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			plaintext := []byte("session data")
