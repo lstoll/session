@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -21,6 +22,8 @@ import (
 type sessionData struct {
 	User string
 }
+
+const testDBSCBoundCookieName = "__Host-session-id-bound"
 
 func chromeDBSCAllocatorOptions(userDataDir string) []chromedp.ExecAllocatorOption {
 	co := append(chromedp.DefaultExecAllocatorOptions[:],
@@ -78,7 +81,7 @@ func startDBSCTestServer(t *testing.T) string {
 		data := sess.Get()
 		data.User = "alice"
 		sess.Set(data)
-		http.Redirect(w, r, "/protected", http.StatusSeeOther)
+		_, _ = w.Write([]byte("logged in"))
 	})
 
 	mux.HandleFunc("/protected", func(w http.ResponseWriter, r *http.Request) {
@@ -99,6 +102,18 @@ func startDBSCTestServer(t *testing.T) string {
 			return
 		}
 		w.Write([]byte("unbound"))
+	})
+	mux.HandleFunc("/expire-bound-cookie", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{
+			Name:     testDBSCBoundCookieName,
+			Path:     "/",
+			Secure:   true,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Expires:  time.Unix(1, 0),
+			MaxAge:   -1,
+		})
+		http.Redirect(w, r, "/protected", http.StatusTemporaryRedirect)
 	})
 
 	ts := httptest.NewUnstartedServer(mgr.Wrap(mux))
@@ -153,10 +168,31 @@ func runDBSCChromeFlow(t *testing.T, baseURL string) {
 
 	ctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
+	creationEvents := make(chan *network.EventDeviceBoundSessionEventOccurred, 8)
+	refreshEvents := make(chan *network.EventDeviceBoundSessionEventOccurred, 8)
+	chromedp.ListenTarget(ctx, func(event any) {
+		eventDetails, ok := event.(*network.EventDeviceBoundSessionEventOccurred)
+		if !ok {
+			return
+		}
+		switch {
+		case eventDetails.CreationEventDetails != nil:
+			select {
+			case creationEvents <- eventDetails:
+			default:
+			}
+		case eventDetails.RefreshEventDetails != nil:
+			select {
+			case refreshEvents <- eventDetails:
+			default:
+			}
+		}
+	})
 
 	// 1. Perform login
 	err := chromedp.Run(ctx,
 		network.Enable(),
+		network.EnableDeviceBoundSessions(true),
 		chromedp.Navigate(baseURL+"/login"),
 		chromedp.WaitVisible(`body`, chromedp.ByQuery),
 	)
@@ -164,24 +200,31 @@ func runDBSCChromeFlow(t *testing.T, baseURL string) {
 		t.Fatalf("login failed: %v", err)
 	}
 
-	// 2. Poll /bound until it returns "bound" (timeout after 10s)
+	select {
+	case event := <-creationEvents:
+		if !event.Succeeded || event.CreationEventDetails.FetchResult != network.DeviceBoundSessionFetchResultSuccess {
+			t.Fatalf(
+				"DBSC creation event = succeeded %v, fetch result %q, failed request %#v",
+				event.Succeeded,
+				event.CreationEventDetails.FetchResult,
+				event.CreationEventDetails.FailedRequest,
+			)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for successful DBSC creation event")
+	}
+
+	// 2. Verify the server persisted the device binding.
 	var bound string
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		err := chromedp.Run(ctx,
-			chromedp.Navigate(baseURL+"/bound"),
-			chromedp.Text(`body`, &bound, chromedp.ByQuery),
-		)
-		if err != nil {
-			t.Fatalf("check bound failed: %v", err)
-		}
-		if bound == "bound" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timeout waiting for device-bound session; got %q", bound)
-		}
-		time.Sleep(200 * time.Millisecond)
+	err = chromedp.Run(ctx,
+		chromedp.Navigate(baseURL+"/bound"),
+		chromedp.Text(`body`, &bound, chromedp.ByQuery),
+	)
+	if err != nil {
+		t.Fatalf("check bound failed: %v", err)
+	}
+	if bound != "bound" {
+		t.Fatalf("device binding state = %q, want bound", bound)
 	}
 
 	// 3. Verify access to protected resource
@@ -197,6 +240,76 @@ func runDBSCChromeFlow(t *testing.T, baseURL string) {
 
 	if !strings.Contains(body, "protected") {
 		t.Fatalf("unexpected protected page body: %q", body)
+	}
+
+	// 4. Expire the protected cookie and follow the redirect to an in-scope
+	// resource. Chrome should defer that request, refresh the DBSC session, and
+	// retry it with a rotated cookie.
+	boundCookieBefore := chromeCookieValue(t, ctx, baseURL, testDBSCBoundCookieName)
+	drainDBSCRefreshEvents(refreshEvents)
+	body = ""
+	err = chromedp.Run(ctx,
+		chromedp.Navigate(baseURL+"/expire-bound-cookie"),
+		chromedp.WaitVisible(`body`, chromedp.ByQuery),
+		chromedp.Text(`body`, &body, chromedp.ByQuery),
+	)
+	if err != nil {
+		t.Fatalf("navigation after bound cookie expiry failed: %v", err)
+	}
+	if !strings.Contains(body, "protected") {
+		t.Fatalf("unexpected post-refresh page body: %q", body)
+	}
+
+	select {
+	case event := <-refreshEvents:
+		if !event.Succeeded || event.RefreshEventDetails.RefreshResult != network.RefreshEventDetailsRefreshResultRefreshed {
+			t.Fatalf(
+				"DBSC refresh event = succeeded %v, result %q, fetch result %q, failed request %#v",
+				event.Succeeded,
+				event.RefreshEventDetails.RefreshResult,
+				event.RefreshEventDetails.FetchResult,
+				event.RefreshEventDetails.FailedRequest,
+			)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for successful DBSC refresh event")
+	}
+
+	boundCookieAfter := chromeCookieValue(t, ctx, baseURL, testDBSCBoundCookieName)
+	if boundCookieAfter == boundCookieBefore {
+		t.Fatal("DBSC refresh did not rotate the bound cookie")
+	}
+}
+
+func chromeCookieValue(t *testing.T, ctx context.Context, url, name string) string {
+	t.Helper()
+	var value string
+	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		cookies, err := network.GetCookies().WithURLs([]string{url}).Do(ctx)
+		if err != nil {
+			return err
+		}
+		for _, cookie := range cookies {
+			if cookie.Name == name {
+				value = cookie.Value
+				return nil
+			}
+		}
+		return fmt.Errorf("cookie %q not found", name)
+	}))
+	if err != nil {
+		t.Fatalf("read Chrome cookie: %v", err)
+	}
+	return value
+}
+
+func drainDBSCRefreshEvents(events <-chan *network.EventDeviceBoundSessionEventOccurred) {
+	for {
+		select {
+		case <-events:
+		default:
+			return
+		}
 	}
 }
 

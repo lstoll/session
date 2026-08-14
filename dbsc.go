@@ -237,3 +237,18 @@ func dbscSessionResponseHeader(r *http.Request) string {
 	}
 	return value
 }
+
+// dbscSessionIDHeader reads Sec-Secure-Session-Id from a request.
+func dbscSessionIDHeader(r *http.Request) (string, bool) {
+	raw := strings.TrimSpace(r.Header.Get("Sec-Secure-Session-Id"))
+	if value, ok := parseSFString(raw); ok {
+		return value, value != ""
+	}
+	// Chrome's current implementation sends the opaque session identifier
+	// directly even though the Editor's Draft models this header as an
+	// sf-string. The value is only compared with the server-issued identifier.
+	if raw == "" || len(raw) > 128 || strings.ContainsAny(raw, " \t\r\n\";,") {
+		return "", false
+	}
+	return raw, true
+}

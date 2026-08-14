@@ -204,6 +204,32 @@ func TestDBSCStructuredStrings(t *testing.T) {
 	}
 }
 
+func TestDBSCSessionIDHeader(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		header string
+		want   string
+		ok     bool
+	}{
+		{name: "draft sf-string", header: `"SESSION234567"`, want: "SESSION234567", ok: true},
+		{name: "Chrome raw identifier", header: "2SESSION234567", want: "2SESSION234567", ok: true},
+		{name: "empty"},
+		{name: "whitespace", header: "SESSION ID"},
+		{name: "parameters on raw value", header: "SESSION;other"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/dbsc/refresh", nil)
+			if tt.header != "" {
+				r.Header.Set("Sec-Secure-Session-Id", tt.header)
+			}
+			got, ok := dbscSessionIDHeader(r)
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("dbscSessionIDHeader() = (%q, %v), want (%q, %v)", got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
 func TestDBSCSkippedSessionMatching(t *testing.T) {
 	for _, tt := range []struct {
 		name      string

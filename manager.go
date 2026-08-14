@@ -912,7 +912,7 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 		return true
 	}
 
-	sessionID, ok := parseSFString(r.Header.Get("Sec-Secure-Session-Id"))
+	sessionID, ok := dbscSessionIDHeader(r)
 	if !ok || sessionID == "" || sessionID != sctx.sessdata.DBSCSessionID {
 		http.Error(w, "invalid Sec-Secure-Session-Id", http.StatusUnauthorized)
 		return true
