@@ -358,7 +358,9 @@ const (
 
 var managerCookieValueEncoding = base64.RawURLEncoding
 
-// Wrap creates middleware that handles session management for each request
+// Wrap creates middleware that handles session management for each request.
+// Session mutations must occur before the response is written or flushed;
+// mutating a session after the response is committed panics.
 func (m *Manager[T]) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := r.Context().Value(sessionContextKey[T]{manager: m}).(*Session[T]); ok {
