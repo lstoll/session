@@ -148,7 +148,7 @@ func TestCookieStoreRejectsOversizedValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := mgr.store.(*cookieStore[testSessionData])
-	data := make([]byte, managerMaxCookieSize)
+	data := make([]byte, managerMaxSetCookieSize)
 	if _, err := rand.Read(data); err != nil {
 		t.Fatal(err)
 	}

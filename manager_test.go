@@ -280,6 +280,39 @@ func TestKVManagerRequiresStore(t *testing.T) {
 	}
 }
 
+func TestManagerSetCookieValidatesCompleteSerializedSize(t *testing.T) {
+	cookie := &http.Cookie{
+		Name:     "custom-session-name",
+		Path:     "/a/scoped/application/path",
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   3600,
+	}
+	overhead := len(cookie.String())
+	cookie.Value = strings.Repeat("x", managerMaxSetCookieSize-overhead)
+	if got := len(cookie.String()); got != managerMaxSetCookieSize {
+		t.Fatalf("test cookie size = %d, want %d", got, managerMaxSetCookieSize)
+	}
+
+	w := httptest.NewRecorder()
+	if err := managerSetCookie(w, cookie); err != nil {
+		t.Fatalf("cookie at limit rejected: %v", err)
+	}
+	if got := w.Header().Get("Set-Cookie"); len(got) != managerMaxSetCookieSize {
+		t.Fatalf("Set-Cookie size = %d, want %d", len(got), managerMaxSetCookieSize)
+	}
+
+	cookie.Value += "x"
+	w = httptest.NewRecorder()
+	if err := managerSetCookie(w, cookie); err == nil {
+		t.Fatal("cookie over serialized size limit accepted")
+	}
+	if got := w.Header().Get("Set-Cookie"); got != "" {
+		t.Fatalf("oversized cookie was emitted: %q", got)
+	}
+}
+
 func ptr[T any](v T) *T {
 	return &v
 }

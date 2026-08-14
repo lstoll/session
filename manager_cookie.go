@@ -95,17 +95,12 @@ func (s *cookieStore[T]) writeCookie(w http.ResponseWriter, expiresAt time.Time,
 
 	// Format cookie value: magic.encodedData
 	cookieValue := managerCookieMagic + "." + managerCookieValueEncoding.EncodeToString(encryptedData)
-	if len(cookieValue) > managerMaxCookieSize {
-		return fmt.Errorf("cookie size %d is greater than max %d", len(cookieValue), managerMaxCookieSize)
-	}
 
 	// Set cookie
 	cookie := s.cookieSettings.newCookie(expiresAt)
 	cookie.Value = cookieValue
 
-	http.SetCookie(w, cookie)
-
-	return nil
+	return managerSetCookie(w, cookie)
 }
 
 // sealAEAD prefixes the nonce for conventional cipher.AEAD implementations.

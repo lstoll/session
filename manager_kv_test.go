@@ -312,7 +312,7 @@ func TestKVManager_InvalidAuthenticatorSkipsLookup(t *testing.T) {
 	}))
 	for _, value := range []string{
 		managerAuthenticatedSessionCookieMagic + ".id.invalid",
-		managerAuthenticatedSessionCookieMagic + ".id." + strings.Repeat("x", managerMaxCookieSize),
+		managerAuthenticatedSessionCookieMagic + ".id." + strings.Repeat("x", managerMaxSetCookieSize),
 	} {
 		request := httptest.NewRequest(http.MethodGet, "/", nil)
 		request.AddCookie(&http.Cookie{Name: mgr.cookieSettings.Name, Value: value})

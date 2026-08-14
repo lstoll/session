@@ -51,7 +51,7 @@ func (s *kvStore[T]) parseSessionIDCookie(raw string) (id string, ok bool) {
 		}
 		return raw, true
 	}
-	if len(raw) > managerMaxCookieSize {
+	if len(raw) > managerMaxSetCookieSize {
 		return "", false
 	}
 	parts := strings.SplitN(raw, ".", 3)
@@ -208,16 +208,11 @@ func (s *kvStore[T]) writeSessionCookie(w http.ResponseWriter, expiresAt time.Ti
 	if err != nil {
 		return err
 	}
-	if len(cookieValue) > managerMaxCookieSize {
-		return fmt.Errorf("session ID cookie size %d is greater than max %d", len(cookieValue), managerMaxCookieSize)
-	}
 	cookie := s.cookieSettings.newCookie(expiresAt)
 	cookie.Value = cookieValue
 
 	managerRemoveCookieByName(w, cookie.Name)
-	http.SetCookie(w, cookie)
-
-	return nil
+	return managerSetCookie(w, cookie)
 }
 
 // Generate a consistent hash of session ID for KV storage

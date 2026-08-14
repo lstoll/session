@@ -286,6 +286,9 @@ func validateManagerOpts[T any](opts managerOpts[T], cookieOpts SessionCookieOpt
 	if err := cookie.Valid(); err != nil {
 		return fmt.Errorf("invalid session cookie options: %w", err)
 	}
+	if err := managerValidateCookieSize(cookie); err != nil {
+		return fmt.Errorf("invalid session cookie options: %w", err)
+	}
 	if strings.HasPrefix(cookieOpts.Name, "__Host-") {
 		if cookieOpts.Insecure {
 			return errors.New("session cookie names beginning with __Host- require Secure")
@@ -334,8 +337,8 @@ func isASCIIPrintable(s string) bool {
 
 // Constants for cookie format in the Manager
 const (
-	managerCookieMagic   = "EU1"
-	managerMaxCookieSize = 4096
+	managerCookieMagic      = "EU1"
+	managerMaxSetCookieSize = 4096
 )
 
 var managerCookieValueEncoding = base64.RawURLEncoding
@@ -492,7 +495,9 @@ func (m *Manager[T]) saveSession(w http.ResponseWriter, r *http.Request, sctx *S
 	expiresAt := m.calculateExpiry(sctx.sessdata)
 
 	// Set DBSC bound cookie if device-bound
-	m.setDBSCBoundCookie(w, sctx)
+	if err := m.setDBSCBoundCookie(w, sctx); err != nil {
+		return fmt.Errorf("setting DBSC bound cookie: %w", err)
+	}
 
 	return m.store.save(w, r, expiresAt, sctx.sessdata)
 }
@@ -503,10 +508,14 @@ func (m *Manager[T]) deleteSession(w http.ResponseWriter, r *http.Request, sctx 
 	dc := m.cookieSettings.newCookie(time.Time{})
 	dc.MaxAge = -1
 	managerRemoveCookieByName(w, dc.Name)
-	http.SetCookie(w, dc)
+	if err := managerSetCookie(w, dc); err != nil {
+		return err
+	}
 
 	// Also delete the DBSC bound cookie
-	m.deleteDBSCBoundCookie(w)
+	if err := m.deleteDBSCBoundCookie(w); err != nil {
+		return err
+	}
 
 	return m.store.delete(r)
 }
@@ -604,6 +613,22 @@ func managerRemoveCookieByName(w http.ResponseWriter, cookieName string) {
 	}
 }
 
+func managerValidateCookieSize(cookie *http.Cookie) error {
+	size := len(cookie.String())
+	if size > managerMaxSetCookieSize {
+		return fmt.Errorf("serialized cookie size %d is greater than max %d", size, managerMaxSetCookieSize)
+	}
+	return nil
+}
+
+func managerSetCookie(w http.ResponseWriter, cookie *http.Cookie) error {
+	if err := managerValidateCookieSize(cookie); err != nil {
+		return err
+	}
+	http.SetCookie(w, cookie)
+	return nil
+}
+
 // maybeAttachDBSCRegistrationOffer sets Secure-Session-Registration when the
 // session is being persisted, DBSC is configured, the session is not yet device
 // bound, and there is no pending registration challenge. This is only called
@@ -635,9 +660,9 @@ func (m *Manager[T]) dbscBoundCookieName() string {
 	return m.cookieSettings.Name + "-bound"
 }
 
-func (m *Manager[T]) setDBSCBoundCookie(w http.ResponseWriter, sctx *Session[T]) {
+func (m *Manager[T]) setDBSCBoundCookie(w http.ResponseWriter, sctx *Session[T]) error {
 	if len(sctx.sessdata.DBSCPublicJWK) == 0 {
-		return
+		return nil
 	}
 	// If DBSCCurrentCookieID is empty, generate one
 	if sctx.sessdata.DBSCCurrentCookieID == "" {
@@ -659,10 +684,10 @@ func (m *Manager[T]) setDBSCBoundCookie(w http.ResponseWriter, sctx *Session[T])
 		hc.MaxAge = int(m.opts.DBSCRefreshInterval.Seconds())
 	}
 	managerRemoveCookieByName(w, hc.Name)
-	http.SetCookie(w, hc)
+	return managerSetCookie(w, hc)
 }
 
-func (m *Manager[T]) deleteDBSCBoundCookie(w http.ResponseWriter) {
+func (m *Manager[T]) deleteDBSCBoundCookie(w http.ResponseWriter) error {
 	dc := &http.Cookie{
 		Name:     m.dbscBoundCookieName(),
 		Path:     m.cookieSettings.Path,
@@ -672,7 +697,7 @@ func (m *Manager[T]) deleteDBSCBoundCookie(w http.ResponseWriter) {
 		MaxAge:   -1,
 	}
 	managerRemoveCookieByName(w, dc.Name)
-	http.SetCookie(w, dc)
+	return managerSetCookie(w, dc)
 }
 
 func (m *Manager[T]) dbscRefreshPath() string {
