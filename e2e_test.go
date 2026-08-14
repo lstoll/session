@@ -1,6 +1,9 @@
 package session
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,14 +12,10 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/tink-crypto/tink-go/v2/aead"
-	"github.com/tink-crypto/tink-go/v2/keyset"
-	"github.com/tink-crypto/tink-go/v2/tink"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 func TestE2E(t *testing.T) {
-	aead := newTestAEAD(t)
-
 	t.Run("KV Manager", func(t *testing.T) {
 		mgr, err := NewKVManager[testSessionData](&memoryKV{contents: make(map[string]kvItem)}, nil)
 		if err != nil {
@@ -25,23 +24,22 @@ func TestE2E(t *testing.T) {
 		runE2ETest(t, mgr, true)
 	})
 
-	t.Run("KV Manager with session ID MAC", func(t *testing.T) {
-		mgr, err := NewKVManager[testSessionData](&memoryKV{contents: make(map[string]kvItem)}, &KVManagerOpts[testSessionData]{
-			SessionIDMAC: newTestMAC(t)})
-
-		if err != nil {
-			t.Fatal(err)
-		}
-		runE2ETest(t, mgr, true)
-	})
-
-	t.Run("Cookie Manager", func(t *testing.T) {
-		mgr, err := NewCookieManager[testSessionData](aead, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		runE2ETest(t, mgr, false)
-	})
+	for _, tt := range []struct {
+		name string
+		aead cipher.AEAD
+	}{
+		{name: "AES-GCM", aead: newTestAESGCM(t, false)},
+		{name: "AES-GCM random nonce", aead: newTestAESGCM(t, true)},
+		{name: "XChaCha20-Poly1305", aead: newTestXChaCha20Poly1305(t)},
+	} {
+		t.Run("Cookie Manager/"+tt.name, func(t *testing.T) {
+			mgr, err := NewCookieManager[testSessionData](tt.aead, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runE2ETest(t, mgr, false)
+		})
+	}
 }
 
 func runE2ETest(t testing.TB, mgr *Manager[testSessionData], testReset bool) {
@@ -182,13 +180,39 @@ func must[T any](v T, err error) T {
 	return v
 }
 
-func newTestAEAD(t *testing.T) tink.AEAD {
+func newTestAEAD(t *testing.T) cipher.AEAD {
+	return newTestAESGCM(t, true)
+}
+
+func newTestAESGCM(t *testing.T, randomNonce bool) cipher.AEAD {
 	t.Helper()
-	handle, err := keyset.NewHandle(aead.XAES256GCM192BitNonceKeyTemplate())
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prim, err := aead.New(handle)
+	var prim cipher.AEAD
+	if randomNonce {
+		prim, err = cipher.NewGCMWithRandomNonce(block)
+	} else {
+		prim, err = cipher.NewGCM(block)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prim
+}
+
+func newTestXChaCha20Poly1305(t *testing.T) cipher.AEAD {
+	t.Helper()
+	key := make([]byte, chacha20poly1305.KeySize)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	prim, err := chacha20poly1305.NewX(key)
 	if err != nil {
 		t.Fatal(err)
 	}

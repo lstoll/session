@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/tink-crypto/tink-go/v2/tink"
 )
 
 type KV interface {
@@ -20,50 +18,50 @@ type KV interface {
 	Delete(_ context.Context, key string) error
 }
 
-const managerMACSessionCookieMagic = "MS1"
-
 type kvStore[T any] struct {
 	m              *Manager[T]
 	kv             KV
 	codec          codec[T]
 	cookieSettings SessionCookieOpts
-	mac            tink.MAC
+	authenticator  Authenticator
 }
 
-func (s *kvStore[T]) sessionIDMACInput(id string) []byte {
-	return []byte(s.cookieSettings.Name + ":" + id)
+const managerAuthenticatedSessionCookieMagic = "AS1"
+
+func (s *kvStore[T]) sessionIDAuthenticatorInput(id string) []byte {
+	return []byte(s.cookieSettings.Name + "\x00" + id)
 }
 
-func (s *kvStore[T]) signSessionID(id string) (string, error) {
-	if s.mac == nil {
+func (s *kvStore[T]) authenticateSessionID(id string) (string, error) {
+	if s.authenticator == nil {
 		return id, nil
 	}
-	tag, err := s.mac.ComputeMAC(s.sessionIDMACInput(id))
+	tag, err := s.authenticator.Authenticate(s.sessionIDAuthenticatorInput(id))
 	if err != nil {
-		return "", fmt.Errorf("signing session id: %w", err)
+		return "", fmt.Errorf("authenticating session id: %w", err)
 	}
-	return managerMACSessionCookieMagic + "." + id + "." + managerCookieValueEncoding.EncodeToString(tag), nil
+	return managerAuthenticatedSessionCookieMagic + "." + id + "." + managerCookieValueEncoding.EncodeToString(tag), nil
 }
 
 func (s *kvStore[T]) parseSessionIDCookie(raw string) (id string, ok bool) {
-	if s.mac == nil {
+	if s.authenticator == nil {
 		if !plausibleSessionID(raw) {
 			return "", false
 		}
 		return raw, true
 	}
-	sp := strings.SplitN(raw, ".", 3)
-	if len(sp) != 3 || sp[0] != managerMACSessionCookieMagic || sp[1] == "" || sp[2] == "" {
+	if len(raw) > managerMaxCookieSize {
 		return "", false
 	}
-	tag, err := managerCookieValueEncoding.DecodeString(sp[2])
-	if err != nil {
+	parts := strings.SplitN(raw, ".", 3)
+	if len(parts) != 3 || parts[0] != managerAuthenticatedSessionCookieMagic || !plausibleSessionID(parts[1]) {
 		return "", false
 	}
-	if err := s.mac.VerifyMAC(tag, s.sessionIDMACInput(sp[1])); err != nil {
+	tag, err := managerCookieValueEncoding.DecodeString(parts[2])
+	if err != nil || s.authenticator.Verify(s.sessionIDAuthenticatorInput(parts[1]), tag) != nil {
 		return "", false
 	}
-	return sp[1], true
+	return parts[1], true
 }
 
 // plausibleSessionID bounds attacker-controlled KV lookup input. It does not
@@ -200,9 +198,12 @@ func (s *kvStore[T]) touch(w http.ResponseWriter, r *http.Request, expiresAt tim
 }
 
 func (s *kvStore[T]) writeSessionCookie(w http.ResponseWriter, expiresAt time.Time, sessionID string) error {
-	cookieValue, err := s.signSessionID(sessionID)
+	cookieValue, err := s.authenticateSessionID(sessionID)
 	if err != nil {
 		return err
+	}
+	if len(cookieValue) > managerMaxCookieSize {
+		return fmt.Errorf("session ID cookie size %d is greater than max %d", len(cookieValue), managerMaxCookieSize)
 	}
 	cookie := s.cookieSettings.newCookie(expiresAt)
 	cookie.Value = cookieValue

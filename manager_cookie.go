@@ -1,18 +1,18 @@
 package session
 
 import (
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/tink-crypto/tink-go/v2/tink"
 )
 
 type cookieStore[T any] struct {
-	aead                tink.AEAD
+	aead                cipher.AEAD
 	codec               codec[T]
 	compressionDisabled bool
 	cookieSettings      SessionCookieOpts
@@ -50,7 +50,7 @@ func (s *cookieStore[T]) load(r *http.Request) (persistedSession[T], []byte, err
 	}
 
 	// Decrypt using AEAD with domain separated AD
-	decryptedData, err := s.aead.Decrypt(decodedData, []byte(s.cookieSettings.Name))
+	decryptedData, err := openAEAD(s.aead, decodedData, []byte(s.cookieSettings.Name))
 	if err != nil {
 		return persistedSession[T]{}, nil, nil
 	}
@@ -117,7 +117,7 @@ func (s *cookieStore[T]) writeCookie(w http.ResponseWriter, expiresAt time.Time,
 	}
 
 	// Encrypt data with AEAD
-	encryptedData, err := s.aead.Encrypt(dataWithExpiry, []byte(s.cookieSettings.Name))
+	encryptedData, err := sealAEAD(s.aead, dataWithExpiry, []byte(s.cookieSettings.Name))
 	if err != nil {
 		return fmt.Errorf("encrypting cookie failed: %w", err)
 	}
@@ -135,6 +135,28 @@ func (s *cookieStore[T]) writeCookie(w http.ResponseWriter, expiresAt time.Time,
 	http.SetCookie(w, cookie)
 
 	return nil
+}
+
+// sealAEAD prefixes the nonce for conventional cipher.AEAD implementations.
+// AEADs with a zero NonceSize, such as cipher.NewGCMWithRandomNonce, own their
+// nonce framing and receive the plaintext directly.
+func sealAEAD(aead cipher.AEAD, plaintext, additionalData []byte) ([]byte, error) {
+	nonce := make([]byte, aead.NonceSize())
+	if len(nonce) > 0 {
+		if _, err := rand.Read(nonce); err != nil {
+			return nil, fmt.Errorf("generating AEAD nonce: %w", err)
+		}
+	}
+	ciphertext := aead.Seal(nil, nonce, plaintext, additionalData)
+	return append(nonce, ciphertext...), nil
+}
+
+func openAEAD(aead cipher.AEAD, sealed, additionalData []byte) ([]byte, error) {
+	nonceSize := aead.NonceSize()
+	if len(sealed) < nonceSize+aead.Overhead() {
+		return nil, errors.New("AEAD ciphertext too short")
+	}
+	return aead.Open(nil, sealed[:nonceSize], sealed[nonceSize:], additionalData)
 }
 
 func (s *cookieStore[T]) delete(r *http.Request) error {

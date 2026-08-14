@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -12,6 +13,88 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCookieManagerRequiresAEAD(t *testing.T) {
+	if _, err := NewCookieManager[testSessionData](nil, nil); err == nil {
+		t.Fatal("NewCookieManager accepted a nil AEAD")
+	}
+}
+
+func TestAEADFraming(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		aead cipher.AEAD
+	}{
+		{name: "AES-GCM", aead: newTestAESGCM(t, false)},
+		{name: "AES-GCM random nonce", aead: newTestAESGCM(t, true)},
+		{name: "XChaCha20-Poly1305", aead: newTestXChaCha20Poly1305(t)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plaintext := []byte("session data")
+			additionalData := []byte("cookie name")
+			sealed, err := sealAEAD(tt.aead, plaintext, additionalData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantLen := tt.aead.NonceSize() + len(plaintext) + tt.aead.Overhead()
+			if len(sealed) != wantLen {
+				t.Fatalf("sealed length = %d, want %d", len(sealed), wantLen)
+			}
+			opened, err := openAEAD(tt.aead, sealed, additionalData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(opened, plaintext) {
+				t.Fatalf("opened = %q, want %q", opened, plaintext)
+			}
+			if _, err := openAEAD(tt.aead, sealed, []byte("another cookie")); err == nil {
+				t.Fatal("ciphertext accepted with different additional data")
+			}
+			if _, err := openAEAD(tt.aead, sealed[:len(sealed)-1], additionalData); err == nil {
+				t.Fatal("truncated ciphertext accepted")
+			}
+		})
+	}
+}
+
+func TestCookieManager_AESGCMKeyRotation(t *testing.T) {
+	oldKey := bytes.Repeat([]byte{1}, 32)
+	newKey := bytes.Repeat([]byte{2}, 32)
+	oldAEAD, err := NewRotatingAESGCM(oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldManager, err := NewCookieManager[testSessionData](oldAEAD, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := oldManager.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setTestUser(oldManager.FromContext(r.Context()), "alice")
+	}))
+	seedResponse := httptest.NewRecorder()
+	seed.ServeHTTP(seedResponse, httptest.NewRequest(http.MethodGet, "/", nil))
+	cookies := seedResponse.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("cookies = %#v", cookies)
+	}
+
+	rotatedAEAD, err := NewRotatingAESGCM(newKey, oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedManager, err := NewCookieManager[testSessionData](rotatedAEAD, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	load := rotatedManager.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := rotatedManager.FromContext(r.Context()).Get().User; got != "alice" {
+			t.Fatalf("loaded user = %q, want alice", got)
+		}
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.AddCookie(cookies[0])
+	load.ServeHTTP(httptest.NewRecorder(), request)
+}
 
 func TestCookieManager_RoundTrip(t *testing.T) {
 	aead := newTestAEAD(t)
@@ -263,7 +346,7 @@ func TestCookieManager_CompressionLogic(t *testing.T) {
 	}
 
 	magic := parts[0]
-	t.Logf("Magic: %s, Expected EC1 (compressed)", magic)
+	t.Logf("Magic: %s, expected compressed cookie format", magic)
 
 	if magic != managerCompressedCookieMagic {
 		t.Errorf("Expected cookie magic %s for compression, got %s",
@@ -359,7 +442,7 @@ func cookieStoreRoundTripSave(cs *cookieStore[testSessionData], w http.ResponseW
 		magic = managerCompressedCookieMagic
 	}
 
-	encryptedData, err := cs.aead.Encrypt(dataWithExpiry, []byte(cs.cookieSettings.Name))
+	encryptedData, err := sealAEAD(cs.aead, dataWithExpiry, []byte(cs.cookieSettings.Name))
 	if err != nil {
 		return fmt.Errorf("encrypting cookie failed: %w", err)
 	}
@@ -393,7 +476,7 @@ func cookieStoreRoundTripLoad(cs *cookieStore[testSessionData], cookieValue stri
 		return nil, fmt.Errorf("decoding cookie string: %w", err)
 	}
 
-	decryptedData, err := cs.aead.Decrypt(decodedData, []byte(cs.cookieSettings.Name))
+	decryptedData, err := openAEAD(cs.aead, decodedData, []byte(cs.cookieSettings.Name))
 	if err != nil {
 		return nil, fmt.Errorf("decrypting cookie: %w", err)
 	}

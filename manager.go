@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -11,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tink-crypto/tink-go/v2/tink"
 	"lds.li/session/internal/dbscproof"
 )
 
@@ -108,10 +108,10 @@ type KVManagerOpts[T any] struct {
 	Onload func(T) T
 	// Cookie settings.
 	CookieOpts *SessionCookieOpts
+	// SessionIDAuthenticator authenticates the opaque session ID cookie. When
+	// set, invalid cookies are rejected before they can cause a KV lookup.
+	SessionIDAuthenticator Authenticator
 
-	// SessionIDMAC authenticates the opaque session ID cookie value. When set,
-	// clients cannot forge session IDs to provoke arbitrary KV lookups or writes.
-	SessionIDMAC tink.MAC
 	// EagerLoad loads session data from the KV store on every request. The default
 	// is lazy loading: peek the session cookie up front and defer the KV Get until
 	// the handler (or a DBSC endpoint) actually needs session state.
@@ -135,9 +135,15 @@ type KVManagerOpts[T any] struct {
 	DBSCOrigin string
 }
 
-// NewCookieManager creates a new Manager that stores session data in cookies
-func NewCookieManager[T any](aead tink.AEAD, opts *CookieManagerOpts[T]) (*Manager[T], error) {
+// NewCookieManager creates a new Manager that stores session data in cookies.
+// It accepts any concurrency-safe cipher.AEAD. The manager generates and
+// prefixes nonces for conventional AEADs; an AEAD with a zero nonce size, such
+// as cipher.NewGCMWithRandomNonce, manages its own nonce framing.
+func NewCookieManager[T any](aead cipher.AEAD, opts *CookieManagerOpts[T]) (*Manager[T], error) {
 	normalized, compressionDisabled := normalizeCookieManagerOpts(opts)
+	if aead == nil {
+		return nil, errors.New("AEAD is required")
+	}
 	m := &Manager[T]{
 		opts:  normalized,
 		codec: &gobCodec[T]{},
@@ -168,7 +174,7 @@ func NewCookieManager[T any](aead tink.AEAD, opts *CookieManagerOpts[T]) (*Manag
 
 // NewKVManager creates a new Manager that stores session data in a KV store
 func NewKVManager[T any](kv KV, opts *KVManagerOpts[T]) (*Manager[T], error) {
-	normalized, sessionIDMAC, eagerLoad := normalizeKVManagerOpts(opts)
+	normalized, sessionIDAuthenticator, eagerLoad := normalizeKVManagerOpts(opts)
 	m := &Manager[T]{
 		opts:  normalized,
 		codec: &gobCodec[T]{},
@@ -196,7 +202,7 @@ func NewKVManager[T any](kv KV, opts *KVManagerOpts[T]) (*Manager[T], error) {
 		kv:             kv,
 		codec:          m.codec,
 		cookieSettings: m.cookieSettings,
-		mac:            sessionIDMAC,
+		authenticator:  sessionIDAuthenticator,
 	}
 
 	m.lazyLoad = !eagerLoad
@@ -221,7 +227,7 @@ func normalizeCookieManagerOpts[T any](opts *CookieManagerOpts[T]) (managerOpts[
 	return normalized, opts.DisableCompression
 }
 
-func normalizeKVManagerOpts[T any](opts *KVManagerOpts[T]) (managerOpts[T], tink.MAC, bool) {
+func normalizeKVManagerOpts[T any](opts *KVManagerOpts[T]) (managerOpts[T], Authenticator, bool) {
 	if opts == nil {
 		return managerOpts[T]{IdleTimeout: DefaultIdleTimeout}, nil, false
 	}
@@ -239,7 +245,7 @@ func normalizeKVManagerOpts[T any](opts *KVManagerOpts[T]) (managerOpts[T], tink
 	if normalized.IdleTimeout == 0 && normalized.MaxLifetime == 0 {
 		normalized.IdleTimeout = DefaultIdleTimeout
 	}
-	return normalized, opts.SessionIDMAC, opts.EagerLoad
+	return normalized, opts.SessionIDAuthenticator, opts.EagerLoad
 }
 
 func validateDBSCOpts[T any](opts managerOpts[T]) error {
