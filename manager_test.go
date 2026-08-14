@@ -1,9 +1,37 @@
 package session
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+type touchRecordingStore[T any] struct {
+	expiresAt time.Time
+	data      []byte
+}
+
+//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
+func (*touchRecordingStore[T]) load(*http.Request) (persistedSession[T], []byte, error) {
+	return persistedSession[T]{}, nil, nil
+}
+
+//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
+func (*touchRecordingStore[T]) save(http.ResponseWriter, *http.Request, time.Time, persistedSession[T]) error {
+	return nil
+}
+
+//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
+func (*touchRecordingStore[T]) delete(*http.Request) error { return nil }
+
+//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
+func (s *touchRecordingStore[T]) touch(_ http.ResponseWriter, _ *http.Request, expiresAt time.Time, data []byte) error {
+	s.expiresAt = expiresAt
+	s.data = data
+	return nil
+}
 
 func TestItem_InvalidAt(t *testing.T) {
 	now := time.Now()
@@ -77,6 +105,178 @@ func TestItem_InvalidAt(t *testing.T) {
 				t.Errorf("InvalidAt() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTouchSessionAdvancesIdleExpiryAndPersistsUpdatedAt(t *testing.T) {
+	const idleTimeout = time.Hour
+	codec := &gobCodec[string]{}
+	store := &touchRecordingStore[string]{}
+	mgr := &Manager[string]{
+		store: store,
+		codec: codec,
+		opts:  managerOpts[string]{IdleTimeout: idleTimeout},
+	}
+
+	original := persistedSession[string]{
+		Data:      "stored",
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+		UpdatedAt: time.Now().Add(-30 * time.Minute),
+	}
+	loadedData, err := codec.Encode(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx := &Session[string]{
+		sessdata:   original,
+		loadedData: loadedData,
+	}
+	// Simulate an Onload transformation. A clean-session touch must not persist it.
+	sctx.sessdata.Data = "transformed"
+
+	before := time.Now()
+	if err := mgr.touchSession(
+		httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodGet, "/", nil),
+		sctx,
+	); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now()
+
+	persisted, err := codec.Decode(store.data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Data != original.Data {
+		t.Fatalf("persisted data = %q, want original %q", persisted.Data, original.Data)
+	}
+	if persisted.UpdatedAt.Before(before) || persisted.UpdatedAt.After(after) {
+		t.Fatalf("persisted UpdatedAt = %v, want between %v and %v", persisted.UpdatedAt, before, after)
+	}
+	if !sctx.sessdata.UpdatedAt.Equal(persisted.UpdatedAt) {
+		t.Fatalf("in-memory UpdatedAt = %v, persisted %v", sctx.sessdata.UpdatedAt, persisted.UpdatedAt)
+	}
+	wantExpiry := persisted.UpdatedAt.Add(idleTimeout)
+	if !store.expiresAt.Equal(wantExpiry) {
+		t.Fatalf("expiry = %v, want %v", store.expiresAt, wantExpiry)
+	}
+	if !store.expiresAt.After(original.UpdatedAt.Add(idleTimeout)) {
+		t.Fatalf("expiry did not advance: got %v, original %v", store.expiresAt, original.UpdatedAt.Add(idleTimeout))
+	}
+}
+
+func TestManagerConstructorValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		maxLifetime time.Duration
+		idleTimeout time.Duration
+		cookieOpts  SessionCookieOpts
+		wantErr     string
+	}{
+		{
+			name:        "negative max lifetime",
+			maxLifetime: -time.Second,
+			idleTimeout: time.Hour,
+			cookieOpts:  SessionCookieOpts{Name: "session", Path: "/"},
+			wantErr:     "MaxLifetime must not be negative",
+		},
+		{
+			name:        "negative idle timeout",
+			maxLifetime: time.Hour,
+			idleTimeout: -time.Second,
+			cookieOpts:  SessionCookieOpts{Name: "session", Path: "/"},
+			wantErr:     "IdleTimeout must not be negative",
+		},
+		{
+			name:        "empty cookie name",
+			idleTimeout: time.Hour,
+			cookieOpts:  SessionCookieOpts{Path: "/"},
+			wantErr:     "invalid Cookie.Name",
+		},
+		{
+			name:        "invalid cookie name",
+			idleTimeout: time.Hour,
+			cookieOpts:  SessionCookieOpts{Name: "bad name", Path: "/"},
+			wantErr:     "invalid Cookie.Name",
+		},
+		{
+			name:        "empty cookie path",
+			idleTimeout: time.Hour,
+			cookieOpts:  SessionCookieOpts{Name: "session"},
+			wantErr:     "absolute path",
+		},
+		{
+			name:        "relative cookie path",
+			idleTimeout: time.Hour,
+			cookieOpts:  SessionCookieOpts{Name: "session", Path: "app"},
+			wantErr:     "absolute path",
+		},
+		{
+			name:        "invalid cookie path byte",
+			idleTimeout: time.Hour,
+			cookieOpts:  SessionCookieOpts{Name: "session", Path: "/app;admin"},
+			wantErr:     "invalid byte",
+		},
+		{
+			name:        "insecure host cookie",
+			idleTimeout: time.Hour,
+			cookieOpts:  SessionCookieOpts{Name: "__Host-session", Path: "/", Insecure: true},
+			wantErr:     "__Host- require Secure",
+		},
+		{
+			name:        "scoped host cookie",
+			idleTimeout: time.Hour,
+			cookieOpts:  SessionCookieOpts{Name: "__Host-session", Path: "/app"},
+			wantErr:     "__Host- require Path /",
+		},
+		{
+			name:        "insecure secure-prefix cookie",
+			idleTimeout: time.Hour,
+			cookieOpts:  SessionCookieOpts{Name: "__Secure-session", Path: "/", Insecure: true},
+			wantErr:     "__Secure- require Secure",
+		},
+	}
+
+	for _, managerType := range []string{"cookie", "KV"} {
+		for _, tt := range tests {
+			t.Run(managerType+"/"+tt.name, func(t *testing.T) {
+				var err error
+				switch managerType {
+				case "cookie":
+					_, err = NewCookieManager[string](newTestAEAD(t), &CookieManagerOpts[string]{
+						MaxLifetime: tt.maxLifetime,
+						IdleTimeout: tt.idleTimeout,
+						CookieOpts:  &tt.cookieOpts,
+					})
+				case "KV":
+					_, err = NewKVManager[string](NewMemoryKV(), &KVManagerOpts[string]{
+						MaxLifetime: tt.maxLifetime,
+						IdleTimeout: tt.idleTimeout,
+						CookieOpts:  &tt.cookieOpts,
+					})
+				}
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+				}
+			})
+		}
+	}
+}
+
+func TestManagerConstructorAcceptsValidScopedCookie(t *testing.T) {
+	cookieOpts := &SessionCookieOpts{Name: "app-session", Path: "/app", Insecure: true, Persist: true}
+	if _, err := NewCookieManager[string](newTestAEAD(t), &CookieManagerOpts[string]{CookieOpts: cookieOpts}); err != nil {
+		t.Fatalf("NewCookieManager: %v", err)
+	}
+	if _, err := NewKVManager[string](NewMemoryKV(), &KVManagerOpts[string]{CookieOpts: cookieOpts}); err != nil {
+		t.Fatalf("NewKVManager: %v", err)
+	}
+}
+
+func TestKVManagerRequiresStore(t *testing.T) {
+	if _, err := NewKVManager[string](nil, nil); err == nil {
+		t.Fatal("NewKVManager accepted a nil KV store")
 	}
 }
 

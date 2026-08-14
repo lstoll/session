@@ -34,8 +34,8 @@ type Session[T any] struct {
 	reqW     http.ResponseWriter
 	reqR     *http.Request
 	sessdata persistedSession[T]
-	// loadedData is the original encoded session. It lets idle-timeout touches
-	// extend storage without re-encoding unchanged application data.
+	// loadedData is the original encoded session. Idle-timeout touches use it to
+	// update the persisted timestamp without saving Onload transformations.
 	loadedData []byte
 	state      sessionState
 	rotate     bool
@@ -98,6 +98,10 @@ func (s *Session[T]) Set(data T) {
 }
 
 // Delete marks the session for deletion at the end of the request.
+//
+// With a KV-backed manager, Delete removes the server-side session. With a
+// cookie-backed manager, it only instructs the current client to remove its
+// cookie; previously copied cookie values remain valid until expiration.
 func (s *Session[T]) Delete() {
 	s.ensureLoaded()
 	if s.aborted {
@@ -112,7 +116,13 @@ func (s *Session[T]) Delete() {
 	s.rotate = false
 }
 
-// Reset rotates the session ID to avoid session fixation.
+// Reset renews the session while retaining its data.
+//
+// With a KV-backed manager, Reset deletes the current server-side session and
+// assigns a new session ID, invalidating the previous ID. With a cookie-backed
+// manager, it only issues a newly encrypted cookie; previously copied cookie
+// values remain valid until expiration. Applications requiring revocation or
+// session ID rotation must use a KV-backed manager.
 func (s *Session[T]) Reset() {
 	s.ensureLoaded()
 	if s.aborted {

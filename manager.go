@@ -47,7 +47,11 @@ var DefaultIdleTimeout = 24 * time.Hour
 
 // SessionCookieOpts configures cookie behavior for sessions
 type SessionCookieOpts struct {
-	Name     string
+	// Name must be a valid HTTP cookie name. Names beginning with __Host- must
+	// use Path "/" and a secure cookie; names beginning with __Secure- must use
+	// a secure cookie.
+	Name string
+	// Path must be an absolute cookie path beginning with "/".
 	Path     string
 	Insecure bool
 	Persist  bool
@@ -83,7 +87,11 @@ type managerOpts[T any] struct {
 
 // CookieManagerOpts configures options specifically for the cookie-based session manager
 type CookieManagerOpts[T any] struct {
+	// MaxLifetime is the maximum duration a session remains valid after its
+	// creation. Zero disables the limit; negative values are rejected.
 	MaxLifetime time.Duration
+	// IdleTimeout is extended whenever a loaded session is used. Zero disables
+	// the limit; negative values are rejected.
 	IdleTimeout time.Duration
 	// ErrorHandler handles failures that prevent the manager from safely loading
 	// or persisting session state. When nil, the manager logs the error and
@@ -97,7 +105,11 @@ type CookieManagerOpts[T any] struct {
 
 // KVManagerOpts configures options specifically for the KV-based session manager
 type KVManagerOpts[T any] struct {
+	// MaxLifetime is the maximum duration a session remains valid after its
+	// creation. Zero disables the limit; negative values are rejected.
 	MaxLifetime time.Duration
+	// IdleTimeout is extended whenever a loaded session is used. Zero disables
+	// the limit; negative values are rejected.
 	IdleTimeout time.Duration
 	// ErrorHandler handles failures that prevent the manager from safely loading
 	// or persisting session state. Eager load failures prevent the application
@@ -140,6 +152,11 @@ type KVManagerOpts[T any] struct {
 // It accepts any concurrency-safe cipher.AEAD. The manager generates and
 // prefixes nonces for conventional AEADs; an AEAD with a zero nonce size, such
 // as cipher.NewGCMWithRandomNonce, manages its own nonce framing.
+//
+// Cookie-backed sessions cannot be revoked server-side. Delete removes the
+// current browser's cookie and Reset reissues it, but previously copied cookie
+// values remain valid until their configured expiration. Use NewKVManager when
+// server-side revocation or session ID rotation is required.
 func NewCookieManager[T any](aead cipher.AEAD, opts *CookieManagerOpts[T]) (*Manager[T], error) {
 	normalized := normalizeCookieManagerOpts(opts)
 	if aead == nil {
@@ -150,9 +167,6 @@ func NewCookieManager[T any](aead cipher.AEAD, opts *CookieManagerOpts[T]) (*Man
 		codec: &gobCodec[T]{},
 	}
 
-	if m.opts.IdleTimeout == 0 && m.opts.MaxLifetime == 0 {
-		return nil, errors.New("at least one of idle timeout or max lifetime must be specified")
-	}
 	// Set cookie options
 	if m.opts.CookieOpts != nil {
 		m.cookieSettings = *m.opts.CookieOpts
@@ -161,6 +175,9 @@ func NewCookieManager[T any](aead cipher.AEAD, opts *CookieManagerOpts[T]) (*Man
 			Name: "__Host-session",
 			Path: "/",
 		}
+	}
+	if err := validateManagerOpts(m.opts, m.cookieSettings); err != nil {
+		return nil, err
 	}
 
 	m.store = &cookieStore[T]{
@@ -174,15 +191,15 @@ func NewCookieManager[T any](aead cipher.AEAD, opts *CookieManagerOpts[T]) (*Man
 
 // NewKVManager creates a new Manager that stores session data in a KV store
 func NewKVManager[T any](kv KV, opts *KVManagerOpts[T]) (*Manager[T], error) {
+	if kv == nil {
+		return nil, errors.New("KV store is required")
+	}
 	normalized, sessionIDAuthenticator, eagerLoad := normalizeKVManagerOpts(opts)
 	m := &Manager[T]{
 		opts:  normalized,
 		codec: &gobCodec[T]{},
 	}
 
-	if m.opts.IdleTimeout == 0 && m.opts.MaxLifetime == 0 {
-		return nil, errors.New("at least one of idle timeout or max lifetime must be specified")
-	}
 	if err := validateDBSCOpts(m.opts); err != nil {
 		return nil, err
 	}
@@ -195,6 +212,9 @@ func NewKVManager[T any](kv KV, opts *KVManagerOpts[T]) (*Manager[T], error) {
 			Name: "__Host-session-id",
 			Path: "/",
 		}
+	}
+	if err := validateManagerOpts(m.opts, m.cookieSettings); err != nil {
+		return nil, err
 	}
 
 	m.store = &kvStore[T]{
@@ -246,6 +266,38 @@ func normalizeKVManagerOpts[T any](opts *KVManagerOpts[T]) (managerOpts[T], Auth
 		normalized.IdleTimeout = DefaultIdleTimeout
 	}
 	return normalized, opts.SessionIDAuthenticator, opts.EagerLoad
+}
+
+func validateManagerOpts[T any](opts managerOpts[T], cookieOpts SessionCookieOpts) error {
+	if opts.MaxLifetime < 0 {
+		return errors.New("MaxLifetime must not be negative")
+	}
+	if opts.IdleTimeout < 0 {
+		return errors.New("IdleTimeout must not be negative")
+	}
+	if opts.IdleTimeout == 0 && opts.MaxLifetime == 0 {
+		return errors.New("at least one of IdleTimeout or MaxLifetime must be specified")
+	}
+	if !strings.HasPrefix(cookieOpts.Path, "/") {
+		return errors.New("session cookie Path must be an absolute path beginning with /")
+	}
+	cookie := cookieOpts.newCookie(time.Now().Add(time.Hour))
+	cookie.Value = "validation"
+	if err := cookie.Valid(); err != nil {
+		return fmt.Errorf("invalid session cookie options: %w", err)
+	}
+	if strings.HasPrefix(cookieOpts.Name, "__Host-") {
+		if cookieOpts.Insecure {
+			return errors.New("session cookie names beginning with __Host- require Secure")
+		}
+		if cookieOpts.Path != "/" {
+			return errors.New("session cookie names beginning with __Host- require Path /")
+		}
+	}
+	if strings.HasPrefix(cookieOpts.Name, "__Secure-") && cookieOpts.Insecure {
+		return errors.New("session cookie names beginning with __Secure- require Secure")
+	}
+	return nil
 }
 
 func validateDBSCOpts[T any](opts managerOpts[T]) error {
@@ -459,10 +511,26 @@ func (m *Manager[T]) deleteSession(w http.ResponseWriter, r *http.Request, sctx 
 	return m.store.delete(r)
 }
 
-// touchSession updates the session expiry without modifying content
+// touchSession advances the idle deadline without persisting changes made by
+// Onload. loadedData is the original encoded session, so decode it and update
+// only the timestamp used to calculate idle expiry.
 func (m *Manager[T]) touchSession(w http.ResponseWriter, r *http.Request, sctx *Session[T]) error {
-	expiresAt := m.calculateExpiry(sctx.sessdata)
-	return m.store.touch(w, r, expiresAt, sctx.loadedData)
+	persisted, err := m.codec.Decode(sctx.loadedData)
+	if err != nil {
+		return fmt.Errorf("decoding session for idle timeout refresh: %w", err)
+	}
+
+	updatedAt := time.Now()
+	persisted.UpdatedAt = updatedAt
+	sctx.sessdata.UpdatedAt = updatedAt
+
+	data, err := m.codec.Encode(persisted)
+	if err != nil {
+		return fmt.Errorf("encoding session for idle timeout refresh: %w", err)
+	}
+
+	expiresAt := m.calculateExpiry(persisted)
+	return m.store.touch(w, r, expiresAt, data)
 }
 
 func (m *Manager[T]) calculateExpiry(sessdata persistedSession[T]) time.Time {
