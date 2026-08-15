@@ -56,7 +56,7 @@ func (s *cookieStore[T]) load(r *http.Request) (persistedSession[T], []byte, err
 
 	// Check expiry
 	if len(decryptedData) < 8 {
-		return persistedSession[T]{}, nil, errors.New("decrypted data too short")
+		return persistedSession[T]{}, nil, nil
 	}
 	expiresAt := time.Unix(int64(binary.LittleEndian.Uint64(decryptedData[:8])), 0)
 	if expiresAt.Before(time.Now()) {

@@ -223,6 +223,11 @@ func isASCIIAlpha(c byte) bool {
 	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
 }
 
+// dbscSameOriginRequest reports whether this is a same-origin browser request.
+func dbscSameOriginRequest(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Site") == "same-origin"
+}
+
 // dbscSessionResponseHeader reads Secure-Session-Response from a request.
 func dbscSessionResponseHeader(r *http.Request) string {
 	raw := strings.TrimSpace(r.Header.Get("Secure-Session-Response"))

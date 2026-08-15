@@ -801,6 +801,18 @@ func (m *Manager[T]) dbscCookieCredentialAttributes() string {
 	return b.String()
 }
 
+func (m *Manager[T]) dbscWriteExistingInstructions(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
+	body, err := m.dbscRegistrationInstructions(sctx.sessdata.DBSCSessionID)
+	if err != nil {
+		m.handleErr(w, r, err)
+		return true
+	}
+	m.dbscWriteInstructions(w, r, body)
+	slog.DebugContext(r.Context(), "dbsc registration replayed existing instructions",
+		"session_identifier_len", len(sctx.sessdata.DBSCSessionID))
+	return true
+}
+
 // dbscWriteInstructions sets headers, writes the JSON body, and logs warnings.
 func (m *Manager[T]) dbscWriteInstructions(w http.ResponseWriter, r *http.Request, body []byte) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -837,7 +849,7 @@ func (m *Manager[T]) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Re
 	if r.Method != http.MethodPost || r.URL.Path != m.dbscRegistrationPath() {
 		return false
 	}
-	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+	if !dbscSameOriginRequest(r) {
 		http.Error(w, "Cross-site registration rejected", http.StatusForbidden)
 		return true
 	}
@@ -845,8 +857,14 @@ func (m *Manager[T]) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Re
 		"method", r.Method, "path", r.URL.Path,
 		"has_jwk", len(sctx.sessdata.DBSCPublicJWK) > 0)
 	if len(sctx.sessdata.DBSCPublicJWK) != 0 {
-		slog.DebugContext(r.Context(), "dbsc registration POST not handled", "reason", "already_bound")
-		return false
+		return m.dbscWriteExistingInstructions(w, r, sctx)
+	}
+
+	now := time.Now()
+	if !hasPendingDBSCRegistrationChallenge(sctx, now) {
+		slog.DebugContext(r.Context(), "dbsc registration POST rejected", "reason", "no_pending_challenge")
+		http.Error(w, "invalid registration proof", http.StatusUnauthorized)
+		return true
 	}
 
 	tok := dbscSessionResponseHeader(r)
@@ -857,7 +875,6 @@ func (m *Manager[T]) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Re
 	}
 	slog.DebugContext(r.Context(), "dbsc registration verifying proof", "header_len", len(tok))
 
-	now := time.Now()
 	registration, err := dbscproof.VerifyRegistration(tok)
 	if err != nil {
 		slog.WarnContext(r.Context(), "DBSC registration proof rejected", "err", err)
@@ -900,7 +917,7 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 	if r.Method != http.MethodPost || r.URL.Path != m.dbscRefreshPath() {
 		return false
 	}
-	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+	if !dbscSameOriginRequest(r) {
 		http.Error(w, "Cross-site refresh rejected", http.StatusForbidden)
 		return true
 	}

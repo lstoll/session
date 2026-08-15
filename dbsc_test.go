@@ -91,6 +91,15 @@ func TestDBSC(t *testing.T) {
 		t.Run("registration_cross_site_rejected", func(t *testing.T) {
 			testDBSCRegistrationCrossSiteRejected(t)
 		})
+		t.Run("registration_requires_same_origin", func(t *testing.T) {
+			testDBSCRegistrationRequiresSameOrigin(t)
+		})
+		t.Run("registration_without_challenge_rejected", func(t *testing.T) {
+			testDBSCRegistrationWithoutChallengeRejected(t)
+		})
+		t.Run("registration_already_bound_replays_instructions", func(t *testing.T) {
+			testDBSCRegistrationAlreadyBoundReplaysInstructions(t)
+		})
 	})
 }
 
@@ -471,6 +480,24 @@ func TestDBSCExpiredRegistrationChallengeIsReoffered(t *testing.T) {
 	}
 }
 
+func TestInitiateDBSCRegistrationSkipsWhenBound(t *testing.T) {
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	mgr, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute)
+	_, _, cookies := completeDBSCRegistration(t, handler, privKey, nil)
+
+	initiate := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mgr.FromContext(r.Context()).InitiateDBSCRegistration(w, r)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := newTestRequest(http.MethodGet, "/initiate", nil)
+	addCookies(req, cookies)
+	rr := httptest.NewRecorder()
+	initiate.ServeHTTP(rr, req)
+	if got := rr.Header().Get("Secure-Session-Registration"); got != "" {
+		t.Fatalf("InitiateDBSCRegistration on bound session sent %q", got)
+	}
+}
+
 func testDBSCRegistrationCrossSiteRejected(t *testing.T) {
 	t.Helper()
 	kv := &memoryKV{contents: make(map[string]kvItem)}
@@ -491,6 +518,73 @@ func testDBSCRegistrationCrossSiteRejected(t *testing.T) {
 	handler.ServeHTTP(rr1, req1)
 	if rr1.Code != http.StatusForbidden {
 		t.Fatalf("cross-site registration: got %v want 403", rr1.Code)
+	}
+}
+
+func testDBSCRegistrationRequiresSameOrigin(t *testing.T) {
+	t.Helper()
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute)
+
+	req0 := newTestRequest(http.MethodGet, "/start", nil)
+	rr0 := httptest.NewRecorder()
+	handler.ServeHTTP(rr0, req0)
+	regChallenge := challengeFromSecureSessionRegistration(t, rr0.Header().Get("Secure-Session-Registration"))
+	cookies := extractCookies(rr0)
+	regJWT := dbscProofJWT(t, privKey, regChallenge, "")
+
+	for _, site := range []string{"", "same-site", "none"} {
+		req := newTestRequest(http.MethodPost, "/register", nil)
+		addCookies(req, cookies)
+		req.Header.Set("Secure-Session-Response", sfString(regJWT))
+		if site == "" {
+			req.Header.Del("Sec-Fetch-Site")
+		} else {
+			req.Header.Set("Sec-Fetch-Site", site)
+		}
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("Sec-Fetch-Site %q: got %v want 403", site, rr.Code)
+		}
+	}
+}
+
+func testDBSCRegistrationWithoutChallengeRejected(t *testing.T) {
+	t.Helper()
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute)
+
+	regJWT := dbscProofJWT(t, privKey, "no-such-challenge", "")
+	req := newTestRequest(http.MethodPost, "/register", nil)
+	req.Header.Set("Secure-Session-Response", sfString(regJWT))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("registration without challenge: got %v want 401", rr.Code)
+	}
+}
+
+func testDBSCRegistrationAlreadyBoundReplaysInstructions(t *testing.T) {
+	t.Helper()
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	_, handler, privKey, _ := setupDBSCHandler(t, kv, 5*time.Minute)
+	_, dbscSessionID, cookies := completeDBSCRegistration(t, handler, privKey, nil)
+
+	req := newTestRequest(http.MethodPost, "/register", nil)
+	addCookies(req, cookies)
+	req.Header.Set("Secure-Session-Response", sfString(dbscProofJWT(t, privKey, "ignored", "")))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("already-bound registration: got %v %s", rr.Code, rr.Body.String())
+	}
+	var instructions map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &instructions); err != nil {
+		t.Fatalf("already-bound json: %v", err)
+	}
+	if instructions["session_identifier"] != dbscSessionID {
+		t.Fatalf("already-bound session_identifier = %v, want %q", instructions["session_identifier"], dbscSessionID)
 	}
 }
 
@@ -638,6 +732,11 @@ func testDBSCInBandChallenge(t *testing.T, refreshInterval time.Duration) {
 	_, handler, privKey, _ := setupDBSCHandler(t, kv, refreshInterval)
 
 	_, dbscSessionID, cookies := completeDBSCRegistration(t, handler, privKey, nil)
+	oldBoundCookie := findCookieByName(cookies, "__Host-session-id-bound")
+	if oldBoundCookie == nil {
+		t.Fatal("missing bound cookie after registration")
+	}
+	oldBoundValue := oldBoundCookie.Value
 
 	time.Sleep(refreshInterval + time.Millisecond)
 
@@ -661,7 +760,7 @@ func testDBSCInBandChallenge(t *testing.T, refreshInterval time.Duration) {
 
 	oldSessionCookie := findCookieByName(cookies, "__Host-session-id")
 	if oldSessionCookie == nil {
-		t.Fatal("missing __Host-session-id cookie before rotation")
+		t.Fatal("missing __Host-session-id cookie before in-band proof")
 	}
 	oldValue := oldSessionCookie.Value
 
@@ -677,14 +776,16 @@ func testDBSCInBandChallenge(t *testing.T, refreshInterval time.Duration) {
 		t.Fatalf("expected 200 after valid in-band challenge, got %v body: %s", rr3.Code, rr3.Body.String())
 	}
 
-	cookies = mergeCookies(cookies, extractCookies(rr3))
-
-	newSessionCookie := findCookieByName(cookies, "__Host-session-id")
-	if newSessionCookie == nil {
-		t.Fatal("missing __Host-session-id cookie after rotation")
+	newSessionCookie := findCookieByName(extractCookies(rr3), "__Host-session-id")
+	if newSessionCookie != nil && newSessionCookie.Value != oldValue && newSessionCookie.MaxAge != -1 {
+		t.Fatal("in-band proof rotated the session cookie")
 	}
-	if newSessionCookie.Value == oldValue {
-		t.Fatal("expected session cookie to rotate after successful in-band challenge")
+	newBoundCookie := findCookieByName(extractCookies(rr3), "__Host-session-id-bound")
+	if newBoundCookie == nil || newBoundCookie.MaxAge == -1 {
+		t.Fatal("missing bound cookie after in-band proof")
+	}
+	if newBoundCookie.Value == oldBoundValue {
+		t.Fatal("expected bound cookie to rotate after successful in-band challenge")
 	}
 }
 
@@ -853,5 +954,7 @@ func findCookieByName(cookies []*http.Cookie, name string) *http.Cookie {
 }
 
 func newTestRequest(method, target string, body io.Reader) *http.Request {
-	return httptest.NewRequest(method, target, body)
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	return req
 }

@@ -105,6 +105,6 @@ func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx 
 
 	sctx.sessdata.DBSCExpiration = now.Add(m.opts.DBSCRefreshInterval)
 	sctx.sessdata.DBSCCurrentCookieID = rand.Text()
-	sctx.Reset()
+	sctx.state = sessionDirty
 	return false
 }

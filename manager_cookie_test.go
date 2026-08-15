@@ -140,6 +140,22 @@ func TestCookieStoreRejectsExpiredTamperedAndWrongContext(t *testing.T) {
 			t.Fatalf("cross-context load = %d bytes, %v", len(encoded), err)
 		}
 	})
+
+	t.Run("short authenticated payload", func(t *testing.T) {
+		sealed, err := sealAEAD(store.aead, []byte("short"), []byte(store.cookieSettings.Name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.AddCookie(&http.Cookie{
+			Name:  store.cookieSettings.Name,
+			Value: managerCookieMagic + "." + managerCookieValueEncoding.EncodeToString(sealed),
+		})
+		_, encoded, err := store.load(r)
+		if err != nil || encoded != nil {
+			t.Fatalf("short payload load = %d bytes, %v", len(encoded), err)
+		}
+	})
 }
 
 func TestCookieStoreRejectsOversizedValue(t *testing.T) {

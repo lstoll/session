@@ -21,7 +21,9 @@ if err != nil {
 
 mux := http.NewServeMux()
 mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
-	sessions.FromContext(r.Context()).Set(SessionData{UserID: "123"})
+	sess := sessions.FromContext(r.Context())
+	sess.Reset()
+	sess.Set(SessionData{UserID: "123"})
 })
 mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {
 	sessions.FromContext(r.Context()).Delete()
@@ -29,6 +31,8 @@ mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {
 
 handler := sessions.Wrap(mux)
 ```
+
+Call `Reset` before storing an authenticated identity so a previously issued session ID cannot be reused after login.
 
 `NewMemoryKV` is useful for tests and single-process development. Production
 deployments normally provide a shared `KV` implementation. The

@@ -138,11 +138,13 @@ func (s *Session[T]) Delete() {
 
 // Reset renews the session while retaining its data.
 //
-// With a KV-backed manager, Reset deletes the current server-side session and
-// assigns a new session ID, invalidating the previous ID. With a cookie-backed
-// manager, it only issues a newly encrypted cookie; previously copied cookie
-// values remain valid until expiration. Applications requiring revocation or
-// session ID rotation must use a KV-backed manager.
+// Call Reset before storing an authenticated identity so a previously issued
+// session ID cannot be reused after login. With a KV-backed manager, Reset
+// deletes the current server-side session and assigns a new session ID,
+// invalidating the previous ID. With a cookie-backed manager, it only issues a
+// newly encrypted cookie; previously copied cookie values remain valid until
+// expiration. Applications requiring revocation or session ID rotation must use
+// a KV-backed manager.
 func (s *Session[T]) Reset() {
 	s.ensureLoaded()
 	if s.aborted {
@@ -208,12 +210,17 @@ func (s *Session[T]) IsDeviceBound() bool {
 // on the first HTTP response that persists session data (after Set), as long
 // as the session is not yet device-bound. Call this if you
 // need a registration offer without saving application data or want to replace
-// the current pending challenge.
+// the current pending challenge. It is a no-op when the session is already
+// device-bound.
 //
 // Requires DBSCRefreshInterval and DBSCRegistrationPath on the session Manager.
 func (s *Session[T]) InitiateDBSCRegistration(w http.ResponseWriter, r *http.Request) {
 	s.ensureLoaded()
 	if s.aborted {
+		return
+	}
+	if len(s.sessdata.DBSCPublicJWK) > 0 {
+		slog.DebugContext(r.Context(), "dbsc InitiateDBSCRegistration skipped", "reason", "already_device_bound")
 		return
 	}
 	s.assertMutable("InitiateDBSCRegistration")
