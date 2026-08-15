@@ -362,7 +362,12 @@ func TestLoginResponseIncludesSecureSessionRegistration(t *testing.T) {
 	defer ts.Close()
 	c := ts.Client()
 	c.Transport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	resp, err := c.Get(ts.URL + "/login")
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/login", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

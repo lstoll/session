@@ -240,7 +240,7 @@ func TestManagerConstructorValidation(t *testing.T) {
 			name:        "persist without max lifetime",
 			idleTimeout: time.Hour,
 			cookieOpts:  SessionCookieOpts{Name: "session", Path: "/", Insecure: true, Persist: true},
-			wantErr:     "Persist requires MaxLifetime",
+			wantErr:     "Persist option requires MaxLifetime",
 		},
 	}
 

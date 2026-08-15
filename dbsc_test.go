@@ -100,6 +100,12 @@ func TestDBSC(t *testing.T) {
 		t.Run("registration_already_bound_replays_instructions", func(t *testing.T) {
 			testDBSCRegistrationAlreadyBoundReplaysInstructions(t)
 		})
+		t.Run("registration_offer_skipped_cross_site", func(t *testing.T) {
+			testDBSCRegistrationOfferSkippedCrossSite(t)
+		})
+		t.Run("registration_offer_on_reset", func(t *testing.T) {
+			testDBSCRegistrationOfferOnReset(t)
+		})
 	})
 }
 
@@ -536,20 +542,26 @@ func testDBSCRegistrationRequiresSameOrigin(t *testing.T) {
 	cookies := extractCookies(rr0)
 	regJWT := dbscProofJWT(t, privKey, regChallenge, "")
 
-	for _, site := range []string{"", "same-site", "none"} {
+	for _, site := range []string{"same-site"} {
 		req := newTestRequest(http.MethodPost, "/register", nil)
 		addCookies(req, cookies)
 		req.Header.Set("Secure-Session-Response", sfString(regJWT))
-		if site == "" {
-			req.Header.Del("Sec-Fetch-Site")
-		} else {
-			req.Header.Set("Sec-Fetch-Site", site)
-		}
+		req.Header.Set("Sec-Fetch-Site", site)
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("Sec-Fetch-Site %q: got %v want 403", site, rr.Code)
 		}
+	}
+
+	reqEmpty := newTestRequest(http.MethodPost, "/register", nil)
+	addCookies(reqEmpty, cookies)
+	reqEmpty.Header.Set("Secure-Session-Response", sfString(regJWT))
+	reqEmpty.Header.Del("Sec-Fetch-Site")
+	rrEmpty := httptest.NewRecorder()
+	handler.ServeHTTP(rrEmpty, reqEmpty)
+	if rrEmpty.Code != http.StatusOK {
+		t.Fatalf("Sec-Fetch-Site empty: got %v want 200", rrEmpty.Code)
 	}
 }
 
@@ -565,6 +577,56 @@ func testDBSCRegistrationWithoutChallengeRejected(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("registration without challenge: got %v want 401", rr.Code)
+	}
+}
+
+func testDBSCRegistrationOfferSkippedCrossSite(t *testing.T) {
+	t.Helper()
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	_, handler, _, _ := setupDBSCHandler(t, kv, 5*time.Minute)
+
+	reqSSO := httptest.NewRequest(http.MethodGet, "/start", nil)
+	reqSSO.Header.Set("Sec-Fetch-Site", "cross-site")
+	rrSSO := httptest.NewRecorder()
+	handler.ServeHTTP(rrSSO, reqSSO)
+	if rrSSO.Code != http.StatusOK {
+		t.Fatalf("cross-site start: %v", rrSSO.Code)
+	}
+	if got := rrSSO.Header().Get("Secure-Session-Registration"); got != "" {
+		t.Fatalf("cross-site start offered registration: %q", got)
+	}
+	cookies := extractCookies(rrSSO)
+
+	reqSame := newTestRequest(http.MethodGet, "/start", nil)
+	addCookies(reqSame, cookies)
+	rrSame := httptest.NewRecorder()
+	handler.ServeHTTP(rrSame, reqSame)
+	if rrSame.Header().Get("Secure-Session-Registration") == "" {
+		t.Fatal("same-origin start after cross-site did not offer registration")
+	}
+}
+
+func testDBSCRegistrationOfferOnReset(t *testing.T) {
+	t.Helper()
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	mgr, _, _, _ := setupDBSCHandler(t, kv, 5*time.Minute)
+	resetHandler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sess := mgr.FromContext(r.Context())
+		sess.Reset()
+		data := sess.Get()
+		data.Bootstrap = "1"
+		sess.Set(data)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := newTestRequest(http.MethodGet, "/login", nil)
+	rr := httptest.NewRecorder()
+	resetHandler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("reset login: %v", rr.Code)
+	}
+	if rr.Header().Get("Secure-Session-Registration") == "" {
+		t.Fatal("Reset then Set did not offer registration")
 	}
 }
 

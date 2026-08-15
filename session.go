@@ -212,11 +212,11 @@ func (s *Session[T]) IsDeviceBound() bool {
 
 // InitiateDBSCRegistration adds Secure-Session-Registration immediately.
 // When DBSC is enabled, the manager normally attaches this header automatically
-// on the first HTTP response that persists session data (after Set), as long
-// as the session is not yet device-bound. Call this if you
-// need a registration offer without saving application data or want to replace
-// the current pending challenge. It is a no-op when the session is already
-// device-bound.
+// on a first-party response that persists session data (Set, Reset, flashes),
+// as long as the session is not yet device-bound. Cross-site requests are
+// skipped. Call this to offer without saving application data or to replace a
+// pending challenge. It is a no-op when already bound or when this request
+// would not auto-offer.
 //
 // Requires DBSCRefreshInterval and DBSCRegistrationPath on the session Manager.
 func (s *Session[T]) InitiateDBSCRegistration(w http.ResponseWriter, r *http.Request) {
@@ -229,6 +229,11 @@ func (s *Session[T]) InitiateDBSCRegistration(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.assertMutable("InitiateDBSCRegistration")
+	if !dbscShouldOfferRegistration(r) {
+		slog.DebugContext(r.Context(), "dbsc InitiateDBSCRegistration skipped", "reason", "not_first_party",
+			dbscFetchMetadata(r))
+		return
+	}
 
 	cfg, ok := r.Context().Value(dbscServeConfigKey{}).(dbscServeConfig[T])
 	if !ok || cfg.RegistrationPath == "" || cfg.GenerateRegistrationChallenge == nil {

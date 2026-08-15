@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/rand"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -223,9 +224,36 @@ func isASCIIAlpha(c byte) bool {
 	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
 }
 
-// dbscSameOriginRequest reports whether this is a same-origin browser request.
+// dbscSameOriginRequest reports whether a DBSC registration or refresh POST
+// should be accepted. Chrome's browser-process fetcher omits Sec-Fetch-*;
+// only explicit cross-site or same-site values from a renderer are rejected.
 func dbscSameOriginRequest(r *http.Request) bool {
-	return r.Header.Get("Sec-Fetch-Site") == "same-origin"
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return true
+	default:
+		return false
+	}
+}
+
+func dbscFetchMetadata(r *http.Request) slog.Attr {
+	return slog.Group("sec_fetch",
+		"site", r.Header.Get("Sec-Fetch-Site"),
+		"mode", r.Header.Get("Sec-Fetch-Mode"),
+		"dest", r.Header.Get("Sec-Fetch-Dest"),
+	)
+}
+
+// dbscShouldOfferRegistration reports whether to attach
+// Secure-Session-Registration on this response. Cross-site and same-site
+// requests are skipped. Same-origin and typed ("none") navigations offer.
+func dbscShouldOfferRegistration(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	default:
+		return false
+	}
 }
 
 // dbscSessionResponseHeader reads Secure-Session-Response from a request.

@@ -207,8 +207,9 @@ type KVManagerOpts[T any] struct {
 	// proof (Secure-Session-Response). When non-empty and DBSCRefreshInterval is set,
 	// the manager handles POSTs to this path and responds with JSON session
 	// instructions; your mux does not need a separate registration handler.
-	// Secure-Session-Registration is also emitted automatically when a response
-	// saves session data (see Session.InitiateDBSCRegistration for edge cases).
+	// Secure-Session-Registration is attached automatically when a first-party
+	// response saves the session (Set, Reset, flashes). Cross-site requests do
+	// not offer. See Session.InitiateDBSCRegistration.
 	DBSCRegistrationPath string
 	// DBSCRefreshPath is the refresh_url placed in session instructions. Defaults
 	// to "/dbsc/refresh" if empty. POSTs to this path are handled by the manager.
@@ -574,9 +575,7 @@ func (m *Manager[T]) saveHook(r *http.Request, sctx *Session[T]) func(w http.Res
 			sctx.sessdata.UpdatedAt = time.Now()
 			// DBSC registration is a response header; this hook runs before the first
 			// Write/WriteHeader reaches the client, so we can still add it here.
-			if !sctx.rotate {
-				m.maybeAttachDBSCRegistrationOffer(w, r, sctx)
-			}
+			m.maybeAttachDBSCRegistrationOffer(w, r, sctx)
 			if err := m.saveSession(w, r, sctx); err != nil {
 				m.handleErr(w, r, err)
 				return false
@@ -740,11 +739,17 @@ func managerSetCookie(w http.ResponseWriter, cookie *http.Cookie) error {
 
 // maybeAttachDBSCRegistrationOffer sets Secure-Session-Registration when the
 // session is being persisted, DBSC is configured, the session is not yet device
-// bound, and there is no pending registration challenge. This is only called
-// for a dirty session, so anonymous read-only hits do not trigger registration.
+// bound, and there is no pending registration challenge. Called only for a
+// dirty session. Reset and Set both offer; Reset is not required to bind.
+// Offers are skipped on cross-site requests.
 func (m *Manager[T]) maybeAttachDBSCRegistrationOffer(w http.ResponseWriter, r *http.Request, sctx *Session[T]) {
 	if m.opts.DBSCRefreshInterval == 0 {
 		slog.DebugContext(r.Context(), "dbsc registration offer skipped", "reason", "dbsc_not_configured")
+		return
+	}
+	if !dbscShouldOfferRegistration(r) {
+		slog.DebugContext(r.Context(), "dbsc registration offer skipped", "reason", "not_first_party",
+			dbscFetchMetadata(r))
 		return
 	}
 	if len(sctx.sessdata.DBSCPublicJWK) != 0 {
@@ -887,6 +892,8 @@ func (m *Manager[T]) tryHandleDBSCRegistration(w http.ResponseWriter, r *http.Re
 		return false
 	}
 	if !dbscSameOriginRequest(r) {
+		slog.WarnContext(r.Context(), "DBSC registration rejected: not first-party",
+			dbscFetchMetadata(r))
 		http.Error(w, "Cross-site registration rejected", http.StatusForbidden)
 		return true
 	}
@@ -955,6 +962,8 @@ func (m *Manager[T]) tryHandleDBSCRefresh(w http.ResponseWriter, r *http.Request
 		return false
 	}
 	if !dbscSameOriginRequest(r) {
+		slog.WarnContext(r.Context(), "DBSC refresh rejected: not first-party",
+			dbscFetchMetadata(r))
 		http.Error(w, "Cross-site refresh rejected", http.StatusForbidden)
 		return true
 	}
