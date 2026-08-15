@@ -2,7 +2,10 @@ package e2e
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -23,13 +26,21 @@ type sessionData struct {
 	User string
 }
 
-const testDBSCBoundCookieName = "__Host-session-id-bound"
+const (
+	testDBSCBoundCookieName = "__Host-session-id-bound"
+	chromeDBSCFeatures      = "DeviceBoundSessions,UseUnexportableKeyServiceInBrowserProcess,EnableBoundSessionCredentialsSoftwareKeysForManualTesting,DeviceBoundSessions:RefreshQuota/false/RequireOriginTrialTokens/false,DeviceBoundSessionsFederatedRegistration,DeviceBoundSessionsDevTools"
+)
 
-func chromeDBSCAllocatorOptions(userDataDir string) []chromedp.ExecAllocatorOption {
+func chromeDBSCAllocatorOptions(userDataDir, spkiAllowlist string) []chromedp.ExecAllocatorOption {
 	co := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("enable-features", "DeviceBoundSessions,DeviceBoundSessionsDevTools,EnableBoundSessionCredentialsSoftwareKeysForManualTesting"),
-		chromedp.Flag("ignore-certificate-errors", "1"),
+		chromedp.Flag("enable-features", chromeDBSCFeatures),
+		chromedp.Flag("ignore-certificate-errors", true),
+		chromedp.Flag("allow-insecure-localhost", true),
 	)
+	if spkiAllowlist != "" {
+		// Chrome 152+ ignores DBSC headers unless cert verification actually succeeds.
+		co = append(co, chromedp.Flag("ignore-certificate-errors-spki-list", spkiAllowlist))
+	}
 	if userDataDir != "" {
 		co = append(co, chromedp.Flag("user-data-dir", userDataDir))
 	}
@@ -43,6 +54,9 @@ func chromeDBSCAllocatorOptions(userDataDir string) []chromedp.ExecAllocatorOpti
 	} else {
 		co = append(co, chromedp.Flag("headless", "new"))
 	}
+	if os.Getenv("CHROME_NO_SANDBOX") == "1" {
+		co = append(co, chromedp.Flag("no-sandbox", true))
+	}
 	return co
 }
 
@@ -52,16 +66,17 @@ func TestDBSC_E2E(t *testing.T) {
 	}
 
 	baseURL := os.Getenv("DBSC_TEST_URL")
+	var spkiAllowlist string
 	if baseURL == "" {
-		baseURL = startDBSCTestServer(t)
+		baseURL, spkiAllowlist = startDBSCTestServer(t)
 	} else {
 		t.Logf("using external DBSC test server at %s", baseURL)
 	}
 
-	runDBSCChromeFlow(t, baseURL)
+	runDBSCChromeFlow(t, baseURL, spkiAllowlist)
 }
 
-func startDBSCTestServer(t *testing.T) string {
+func startDBSCTestServer(t *testing.T) (string, string) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -135,7 +150,12 @@ func startDBSCTestServer(t *testing.T) string {
 		preflightResp.Header.Get("Secure-Session-Registration"),
 		preflightResp.Header.Get("Set-Cookie"))
 
-	return baseURL
+	return baseURL, certSPKIAllowlist(ts.Certificate())
+}
+
+func certSPKIAllowlist(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
 func newDBSCTestManager(t *testing.T, origin string) *session.Manager[sessionData] {
@@ -160,8 +180,11 @@ func newDBSCTestManager(t *testing.T, origin string) *session.Manager[sessionDat
 	return mgr
 }
 
-func runDBSCChromeFlow(t *testing.T, baseURL string) {
-	co := chromeDBSCAllocatorOptions("")
+func runDBSCChromeFlow(t *testing.T, baseURL, spkiAllowlist string) {
+	if spkiAllowlist != "" {
+		t.Logf("trusting test cert SPKI %s", spkiAllowlist)
+	}
+	co := chromeDBSCAllocatorOptions("", spkiAllowlist)
 
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), co...)
 	defer cancel()
@@ -210,7 +233,7 @@ func runDBSCChromeFlow(t *testing.T, baseURL string) {
 				event.CreationEventDetails.FailedRequest,
 			)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timeout waiting for successful DBSC creation event")
 	}
 

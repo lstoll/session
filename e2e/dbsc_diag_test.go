@@ -23,8 +23,9 @@ func TestDBSC_Diag(t *testing.T) {
 
 	co := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.ExecPath("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-		chromedp.Flag("enable-features", "DeviceBoundSessions,DeviceBoundSessionsDevTools,EnableBoundSessionCredentialsSoftwareKeysForManualTesting"),
-		chromedp.Flag("ignore-certificate-errors", "1"),
+		chromedp.Flag("enable-features", chromeDBSCFeatures),
+		chromedp.Flag("ignore-certificate-errors", true),
+		chromedp.Flag("allow-insecure-localhost", true),
 	)
 	if os.Getenv("DBSC_HEADLESS") == "1" {
 		co = append(co, chromedp.Flag("headless", "new"))

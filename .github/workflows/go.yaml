@@ -50,6 +50,9 @@ jobs:
       - name: Test
         env:
           CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          # GitHub-hosted runners do not provide a usable Chrome sandbox.
+          # This browser only accesses the test server bound to loopback.
+          CHROME_NO_SANDBOX: '1'
         run: go test -timeout 5m ./...
 
   sessionstoree2e:
