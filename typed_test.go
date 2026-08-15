@@ -12,6 +12,39 @@ type testSessionData struct {
 	Number    int
 }
 
+func TestSessionResetRestartsLifetime(t *testing.T) {
+	created := time.Now().Add(-2 * time.Hour)
+	updated := time.Now().Add(-time.Hour)
+	sess := &Session[testSessionData]{
+		loaded: true,
+		sessdata: persistedSession[testSessionData]{
+			Data:      testSessionData{User: "alice"},
+			CreatedAt: created,
+			UpdatedAt: updated,
+		},
+	}
+
+	before := time.Now()
+	sess.Reset()
+	after := time.Now()
+
+	if !sess.rotate || sess.state != sessionDirty {
+		t.Fatalf("state = %v, rotate = %v; want dirty, true", sess.state, sess.rotate)
+	}
+	if sess.sessdata.Data.User != "alice" {
+		t.Fatal("Reset dropped session data")
+	}
+	if sess.sessdata.CreatedAt.Equal(created) || sess.sessdata.UpdatedAt.Equal(updated) {
+		t.Fatal("Reset kept previous timestamps")
+	}
+	if sess.sessdata.CreatedAt.Before(before) || sess.sessdata.CreatedAt.After(after) {
+		t.Fatalf("CreatedAt = %v, want between %v and %v", sess.sessdata.CreatedAt, before, after)
+	}
+	if !sess.sessdata.UpdatedAt.Equal(sess.sessdata.CreatedAt) {
+		t.Fatalf("UpdatedAt = %v, CreatedAt = %v", sess.sessdata.UpdatedAt, sess.sessdata.CreatedAt)
+	}
+}
+
 func TestSessionDeleteThenSetStartsFreshSession(t *testing.T) {
 	sess := &Session[testSessionData]{
 		sessdata: persistedSession[testSessionData]{CreatedAt: time.Now().Add(-time.Hour)},

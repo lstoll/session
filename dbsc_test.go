@@ -320,6 +320,8 @@ func TestDBSCOptionsValidation(t *testing.T) {
 		{name: "origin path", opts: managerOpts[struct{}]{DBSCRefreshInterval: time.Minute, DBSCOrigin: "https://example.com/path"}},
 		{name: "relative registration path", opts: managerOpts[struct{}]{DBSCRefreshInterval: time.Minute, DBSCOrigin: "https://example.com", DBSCRegistrationPath: "register"}},
 		{name: "refresh query", opts: managerOpts[struct{}]{DBSCRefreshInterval: time.Minute, DBSCOrigin: "https://example.com", DBSCRefreshPath: "/refresh?x=1"}},
+		{name: "refresh longer than idle", opts: managerOpts[struct{}]{IdleTimeout: time.Minute, DBSCRefreshInterval: 2 * time.Minute, DBSCOrigin: "https://example.com"}},
+		{name: "refresh equal to max lifetime", opts: managerOpts[struct{}]{MaxLifetime: time.Minute, DBSCRefreshInterval: time.Minute, DBSCOrigin: "https://example.com"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := validateDBSCOpts(tt.opts); err == nil {
@@ -328,6 +330,7 @@ func TestDBSCOptionsValidation(t *testing.T) {
 		})
 	}
 	if err := validateDBSCOpts(managerOpts[struct{}]{
+		MaxLifetime:          time.Hour,
 		DBSCRefreshInterval:  time.Minute,
 		DBSCOrigin:           "https://example.com",
 		DBSCRegistrationPath: "/register",

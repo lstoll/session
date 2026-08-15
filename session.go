@@ -129,6 +129,10 @@ func (s *Session[T]) Delete() {
 	}
 	s.assertMutable("Delete")
 
+	s.markDeleted()
+}
+
+func (s *Session[T]) markDeleted() {
 	s.loadedData = nil
 	s.sessdata = persistedSession[T]{}
 	s.isNew = true
@@ -139,12 +143,13 @@ func (s *Session[T]) Delete() {
 // Reset renews the session while retaining its data.
 //
 // Call Reset before storing an authenticated identity so a previously issued
-// session ID cannot be reused after login. With a KV-backed manager, Reset
-// deletes the current server-side session and assigns a new session ID,
-// invalidating the previous ID. With a cookie-backed manager, it only issues a
-// newly encrypted cookie; previously copied cookie values remain valid until
-// expiration. Applications requiring revocation or session ID rotation must use
-// a KV-backed manager.
+// session ID cannot be reused after login. Reset also restarts CreatedAt and
+// UpdatedAt so IdleTimeout and MaxLifetime begin at authentication. With a
+// KV-backed manager, Reset deletes the current server-side session and assigns
+// a new session ID, invalidating the previous ID. With a cookie-backed manager,
+// it only issues a newly encrypted cookie; previously copied cookie values
+// remain valid until expiration. Applications requiring revocation or session
+// ID rotation must use a KV-backed manager.
 func (s *Session[T]) Reset() {
 	s.ensureLoaded()
 	if s.aborted {
@@ -153,9 +158,9 @@ func (s *Session[T]) Reset() {
 	s.assertMutable("Reset")
 
 	s.loadedData = nil
-	if s.sessdata.CreatedAt.IsZero() {
-		s.sessdata.CreatedAt = time.Now()
-	}
+	now := time.Now()
+	s.sessdata.CreatedAt = now
+	s.sessdata.UpdatedAt = now
 	s.state = sessionDirty
 	s.rotate = true
 	s.isNew = true

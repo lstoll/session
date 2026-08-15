@@ -83,8 +83,8 @@ type Manager[T any] struct {
 	lazyLoad       bool
 }
 
-// DefaultIdleTimeout is used when neither manager lifetime option is set.
-const DefaultIdleTimeout = 24 * time.Hour
+// DefaultMaxLifetime is used when neither manager lifetime option is set.
+const DefaultMaxLifetime = 24 * time.Hour
 
 // SessionCookieOpts configures the cookie emitted by a session manager.
 type SessionCookieOpts struct {
@@ -98,6 +98,8 @@ type SessionCookieOpts struct {
 	// local development without TLS.
 	Insecure bool
 	// Persist adds Max-Age so the browser may retain the cookie across restarts.
+	// Persist requires MaxLifetime; an idle timeout alone is not a remember-me
+	// policy.
 	Persist bool
 }
 
@@ -131,7 +133,7 @@ type managerOpts[T any] struct {
 	MaxLifetime  time.Duration
 	IdleTimeout  time.Duration
 	ErrorHandler func(http.ResponseWriter, *http.Request, error)
-	Onload       func(T) T
+	Onload       func(T) (T, bool)
 	CookieOpts   *SessionCookieOpts
 	Codec        Codec
 
@@ -144,7 +146,8 @@ type managerOpts[T any] struct {
 // CookieManagerOpts configures options specifically for the cookie-based session manager
 type CookieManagerOpts[T any] struct {
 	// MaxLifetime is the maximum duration a session remains valid after its
-	// creation. Zero disables the limit; negative values are rejected.
+	// creation. Zero disables the limit; negative values are rejected. When both
+	// this and IdleTimeout are zero, DefaultMaxLifetime is used.
 	MaxLifetime time.Duration
 	// IdleTimeout is extended whenever a loaded session is used. Zero disables
 	// the limit; negative values are rejected.
@@ -153,8 +156,11 @@ type CookieManagerOpts[T any] struct {
 	// or persisting session state. When nil, the manager logs the error and
 	// responds 500.
 	ErrorHandler func(http.ResponseWriter, *http.Request, error)
-	// Onload is called when a session is retrieved from storage.
-	Onload func(T) T
+	// Onload is called when a session is retrieved from storage. The returned
+	// data replaces the in-memory value for this request and is not persisted
+	// unless the handler also Set. Returning false deletes the session as if
+	// Delete were called.
+	Onload func(T) (T, bool)
 	// Cookie settings.
 	CookieOpts *SessionCookieOpts
 	// Codec selects the persisted session encoding. Nil uses JSONCodec.
@@ -164,7 +170,8 @@ type CookieManagerOpts[T any] struct {
 // KVManagerOpts configures options specifically for the KV-based session manager
 type KVManagerOpts[T any] struct {
 	// MaxLifetime is the maximum duration a session remains valid after its
-	// creation. Zero disables the limit; negative values are rejected.
+	// creation. Zero disables the limit; negative values are rejected. When both
+	// this and IdleTimeout are zero, DefaultMaxLifetime is used.
 	MaxLifetime time.Duration
 	// IdleTimeout is extended whenever a loaded session is used. Zero disables
 	// the limit; negative values are rejected.
@@ -175,8 +182,11 @@ type KVManagerOpts[T any] struct {
 	// accessor; the session and response are then aborted. When nil, the manager
 	// logs the error and responds 500.
 	ErrorHandler func(http.ResponseWriter, *http.Request, error)
-	// Onload is called when a session is retrieved from storage.
-	Onload func(T) T
+	// Onload is called when a session is retrieved from storage. The returned
+	// data replaces the in-memory value for this request and is not persisted
+	// unless the handler also Set. Returning false deletes the session as if
+	// Delete were called.
+	Onload func(T) (T, bool)
 	// Cookie settings.
 	CookieOpts *SessionCookieOpts
 	// Codec selects the persisted session encoding. Nil uses JSONCodec.
@@ -300,7 +310,7 @@ func NewKVManager[T any](kv KV, opts *KVManagerOpts[T]) (*Manager[T], error) {
 
 func normalizeCookieManagerOpts[T any](opts *CookieManagerOpts[T]) managerOpts[T] {
 	if opts == nil {
-		return managerOpts[T]{IdleTimeout: DefaultIdleTimeout}
+		return managerOpts[T]{MaxLifetime: DefaultMaxLifetime}
 	}
 	normalized := managerOpts[T]{
 		MaxLifetime:  opts.MaxLifetime,
@@ -310,15 +320,13 @@ func normalizeCookieManagerOpts[T any](opts *CookieManagerOpts[T]) managerOpts[T
 		CookieOpts:   opts.CookieOpts,
 		Codec:        opts.Codec,
 	}
-	if normalized.IdleTimeout == 0 && normalized.MaxLifetime == 0 {
-		normalized.IdleTimeout = DefaultIdleTimeout
-	}
+	applyDefaultLifetime(&normalized)
 	return normalized
 }
 
 func normalizeKVManagerOpts[T any](opts *KVManagerOpts[T]) (managerOpts[T], Authenticator, bool) {
 	if opts == nil {
-		return managerOpts[T]{IdleTimeout: DefaultIdleTimeout}, nil, false
+		return managerOpts[T]{MaxLifetime: DefaultMaxLifetime}, nil, false
 	}
 	normalized := managerOpts[T]{
 		MaxLifetime:          opts.MaxLifetime,
@@ -332,10 +340,14 @@ func normalizeKVManagerOpts[T any](opts *KVManagerOpts[T]) (managerOpts[T], Auth
 		DBSCRefreshPath:      opts.DBSCRefreshPath,
 		DBSCOrigin:           opts.DBSCOrigin,
 	}
-	if normalized.IdleTimeout == 0 && normalized.MaxLifetime == 0 {
-		normalized.IdleTimeout = DefaultIdleTimeout
-	}
+	applyDefaultLifetime(&normalized)
 	return normalized, opts.SessionIDAuthenticator, opts.EagerLoad
+}
+
+func applyDefaultLifetime[T any](opts *managerOpts[T]) {
+	if opts.IdleTimeout == 0 && opts.MaxLifetime == 0 {
+		opts.MaxLifetime = DefaultMaxLifetime
+	}
 }
 
 func validateManagerOpts[T any](opts managerOpts[T], cookieOpts SessionCookieOpts) error {
@@ -347,6 +359,12 @@ func validateManagerOpts[T any](opts managerOpts[T], cookieOpts SessionCookieOpt
 	}
 	if opts.IdleTimeout == 0 && opts.MaxLifetime == 0 {
 		return errors.New("at least one of IdleTimeout or MaxLifetime must be specified")
+	}
+	if cookieOpts.Persist && opts.MaxLifetime == 0 {
+		return errors.New("the Persist option requires MaxLifetime")
+	}
+	if err := validateDBSCRefreshAgainstLifetime(opts); err != nil {
+		return err
 	}
 	if !strings.HasPrefix(cookieOpts.Path, "/") {
 		return errors.New("session cookie Path must be an absolute path beginning with /")
@@ -392,6 +410,20 @@ func validateDBSCOpts[T any](opts managerOpts[T]) error {
 		if path != "" && (!strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#") || !isASCIIPrintable(path)) {
 			return fmt.Errorf("%s must be an absolute URL path without a query or fragment", name)
 		}
+	}
+	return validateDBSCRefreshAgainstLifetime(opts)
+}
+
+func validateDBSCRefreshAgainstLifetime[T any](opts managerOpts[T]) error {
+	if opts.DBSCRefreshInterval <= 0 {
+		return nil
+	}
+	limit := opts.MaxLifetime
+	if opts.IdleTimeout > 0 && (limit == 0 || opts.IdleTimeout < limit) {
+		limit = opts.IdleTimeout
+	}
+	if limit > 0 && opts.DBSCRefreshInterval >= limit {
+		return errors.New("DBSCRefreshInterval must be shorter than IdleTimeout and MaxLifetime")
 	}
 	return nil
 }
@@ -510,7 +542,12 @@ func (m *Manager[T]) installLoadedSession(sctx *Session[T], decoded persistedSes
 			sctx.loadedData = data
 		}
 		if m.opts.Onload != nil {
-			sctx.sessdata.Data = m.opts.Onload(sctx.sessdata.Data)
+			data, keep := m.opts.Onload(sctx.sessdata.Data)
+			if !keep {
+				sctx.markDeleted()
+			} else {
+				sctx.sessdata.Data = data
+			}
 		}
 	}
 	sctx.loaded = true

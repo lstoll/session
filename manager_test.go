@@ -236,6 +236,12 @@ func TestManagerConstructorValidation(t *testing.T) {
 			cookieOpts:  SessionCookieOpts{Name: "__Secure-session", Path: "/", Insecure: true},
 			wantErr:     "__Secure- require Secure",
 		},
+		{
+			name:        "persist without max lifetime",
+			idleTimeout: time.Hour,
+			cookieOpts:  SessionCookieOpts{Name: "session", Path: "/", Insecure: true, Persist: true},
+			wantErr:     "Persist requires MaxLifetime",
+		},
 	}
 
 	for _, managerType := range []string{"cookie", "KV"} {
@@ -266,11 +272,41 @@ func TestManagerConstructorValidation(t *testing.T) {
 
 func TestManagerConstructorAcceptsValidScopedCookie(t *testing.T) {
 	cookieOpts := &SessionCookieOpts{Name: "app-session", Path: "/app", Insecure: true, Persist: true}
-	if _, err := NewCookieManager[string](newTestAEAD(t), &CookieManagerOpts[string]{CookieOpts: cookieOpts}); err != nil {
+	if _, err := NewCookieManager[string](newTestAEAD(t), &CookieManagerOpts[string]{
+		MaxLifetime: 24 * time.Hour,
+		CookieOpts:  cookieOpts,
+	}); err != nil {
 		t.Fatalf("NewCookieManager: %v", err)
 	}
-	if _, err := NewKVManager[string](NewMemoryKV(), &KVManagerOpts[string]{CookieOpts: cookieOpts}); err != nil {
+	if _, err := NewKVManager[string](NewMemoryKV(), &KVManagerOpts[string]{
+		MaxLifetime: 24 * time.Hour,
+		CookieOpts:  cookieOpts,
+	}); err != nil {
 		t.Fatalf("NewKVManager: %v", err)
+	}
+}
+
+func TestManagerDefaultLifetimeIsAbsolute(t *testing.T) {
+	cookieMgr, err := NewCookieManager[string](newTestAEAD(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kvMgr, err := NewKVManager[string](NewMemoryKV(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mgr := range []*Manager[string]{cookieMgr, kvMgr} {
+		if mgr.opts.MaxLifetime != DefaultMaxLifetime || mgr.opts.IdleTimeout != 0 {
+			t.Fatalf("default lifetime = max %v idle %v, want max %v idle 0", mgr.opts.MaxLifetime, mgr.opts.IdleTimeout, DefaultMaxLifetime)
+		}
+	}
+
+	idleOnly, err := NewKVManager[string](NewMemoryKV(), &KVManagerOpts[string]{IdleTimeout: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idleOnly.opts.MaxLifetime != 0 || idleOnly.opts.IdleTimeout != time.Hour {
+		t.Fatalf("explicit idle-only = max %v idle %v", idleOnly.opts.MaxLifetime, idleOnly.opts.IdleTimeout)
 	}
 }
 

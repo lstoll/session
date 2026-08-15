@@ -478,3 +478,109 @@ func TestSession_IsNew(t *testing.T) {
 		reset.ServeHTTP(rr, req)
 	})
 }
+
+func TestKVManager_OnloadKeepTransformsInMemoryOnly(t *testing.T) {
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	mgr, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{
+		Onload: func(data testSessionData) (testSessionData, bool) {
+			data.User = "onload-" + data.User
+			return data, true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setTestUser(mgr.FromContext(r.Context()), "alice")
+		w.WriteHeader(http.StatusOK)
+	}))
+	rrSeed := httptest.NewRecorder()
+	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
+	cookies := rrSeed.Result().Cookies()
+
+	var got testSessionData
+	read := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = mgr.FromContext(r.Context()).Get()
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/read", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	read.ServeHTTP(httptest.NewRecorder(), req)
+	if got.User != "onload-alice" {
+		t.Fatalf("Get().User = %q, want onload-alice", got.User)
+	}
+
+	plain, err := NewKVManager[testSessionData](kv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := plain.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := plain.FromContext(r.Context()).Get().User; got != "alice" {
+			t.Fatalf("stored user = %q, want alice", got)
+		}
+	}))
+	reqStored := httptest.NewRequest(http.MethodGet, "/stored", nil)
+	for _, c := range cookies {
+		reqStored.AddCookie(c)
+	}
+	stored.ServeHTTP(httptest.NewRecorder(), reqStored)
+}
+
+func TestKVManager_OnloadFalseDeletesSession(t *testing.T) {
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	mgr, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{
+		Onload: func(testSessionData) (testSessionData, bool) {
+			return testSessionData{}, false
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setTestUser(mgr.FromContext(r.Context()), "alice")
+		w.WriteHeader(http.StatusOK)
+	}))
+	rrSeed := httptest.NewRecorder()
+	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
+	cookies := rrSeed.Result().Cookies()
+	if len(kv.contents) != 1 {
+		t.Fatalf("seed stored %d keys, want 1", len(kv.contents))
+	}
+
+	var got testSessionData
+	var isNew bool
+	drop := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sess := mgr.FromContext(r.Context())
+		got = sess.Get()
+		isNew = sess.IsNew()
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/drop", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rr := httptest.NewRecorder()
+	drop.ServeHTTP(rr, req)
+	if got != (testSessionData{}) {
+		t.Fatalf("Get after Onload drop = %#v, want zero", got)
+	}
+	if !isNew {
+		t.Fatal("dropped session should be new")
+	}
+	if len(kv.contents) != 0 {
+		t.Fatalf("Onload false should delete KV session, got %d keys", len(kv.contents))
+	}
+	cleared := false
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == mgr.cookieSettings.Name && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("Onload false should clear the session cookie")
+	}
+}

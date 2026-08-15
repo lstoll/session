@@ -163,6 +163,7 @@ func newDBSCTestManager(t *testing.T, origin string) *session.Manager[sessionDat
 	kv := session.NewMemoryKV()
 	opts := &session.KVManagerOpts[sessionData]{
 		IdleTimeout:          1 * time.Hour,
+		MaxLifetime:          24 * time.Hour,
 		DBSCRefreshInterval:  5 * time.Minute,
 		DBSCRegistrationPath: "/register",
 		DBSCRefreshPath:      "/dbsc/refresh",

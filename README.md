@@ -32,7 +32,9 @@ mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {
 handler := sessions.Wrap(mux)
 ```
 
-Call `Reset` before storing an authenticated identity so a previously issued session ID cannot be reused after login.
+Call `Reset` before storing an authenticated identity so a previously issued session ID cannot be reused after login. `Reset` also restarts the session lifetime.
+
+By default a session lives 24 hours from creation (`MaxLifetime`). It is a session cookie (`Persist` off), the browser will drop it when the process ends. `Persist` requires `MaxLifetime`, in this case the cookie will be stored and last between browser processes. Set `IdleTimeout` if you want sliding expiry on session access.
 
 `NewMemoryKV` is useful for tests and single-process development. Production
 deployments normally provide a shared `KV` implementation. The
@@ -98,4 +100,4 @@ sessions, err := session.NewKVManager[SessionData](store, &session.KVManagerOpts
 The manager serves the registration and refresh endpoints and enforces proofs
 on protected sessions. The implementation follows the current [W3C Editor's
 Draft](https://w3c.github.io/webappsec-dbsc/) and has end-to-end coverage against
-Chrome. DBSC is still experimental and its wire format may change.
+Chrome.
