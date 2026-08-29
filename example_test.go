@@ -21,8 +21,8 @@ func ExampleManager() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
 		sess := sessions.FromContext(r.Context())
+		sess.Get().UserID = "alice"
 		sess.Reset()
-		sess.Set(exampleSessionData{UserID: "alice"})
 	})
 	mux.HandleFunc("GET /me", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, sessions.FromContext(r.Context()).Get().UserID)

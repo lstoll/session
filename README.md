@@ -22,8 +22,8 @@ if err != nil {
 mux := http.NewServeMux()
 mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
 	sess := sessions.FromContext(r.Context())
+	sess.Get().UserID = "123"
 	sess.Reset()
-	sess.Set(SessionData{UserID: "123"})
 })
 mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {
 	sessions.FromContext(r.Context()).Delete()
@@ -32,7 +32,7 @@ mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {
 handler := sessions.Wrap(mux)
 ```
 
-Call `Reset` before storing an authenticated identity so a previously issued session ID cannot be reused after login. `Reset` also restarts the session lifetime.
+Call `Reset` when establishing an authenticated identity so a previously issued session ID cannot be reused after login. `Reset` also restarts the session lifetime.
 
 By default a session lives 24 hours from creation (`MaxLifetime`). It is a session cookie (`Persist` off), the browser will drop it when the process ends. `Persist` requires `MaxLifetime`, in this case the cookie will be stored and last between browser processes. Set `IdleTimeout` if you want sliding expiry on session access.
 
@@ -63,9 +63,18 @@ but it cannot revoke a copied cookie before its expiry. Load keys from a secret
 store and keep the current key first. `NewRotatingAESGCM` and
 `NewHMACSHA256Authenticator` both accept older keys for rotation.
 
-Session changes must happen before the response is written or flushed. A
-mutation after the response has committed panics, since it is too late to send
-the updated cookie.
+`Get` returns borrowed request-scoped `*SessionData`; it must not escape the
+request or be accessed concurrently. Mutation alone does not schedule a write:
+call `Save` after changing application data. `Save` snapshots the current value
+for writing at response commit. Metadata-only writes
+such as flashes reuse the latest loaded or explicitly saved application
+payload. Mutations after `Save` are not included unless `Save` is called again.
+`Reset` rotates the identifier and snapshots the current data. Session writes
+after the response has committed panic.
+
+The manager type parameter may be any non-pointer, non-interface type. `Get`
+itself is never nil, but a zero-valued application type can still contain nil
+maps, slices, or pointers that the application must initialize normally.
 
 ## Testing
 
@@ -74,7 +83,7 @@ running storage or cookie middleware:
 
 ```go
 req, change := sessiontest.WithSession(t, req, sessions, SessionData{UserID: "123"})
-handler.ServeHTTP(recorder, req)
+sessions.Wrap(handler).ServeHTTP(recorder, req)
 
 if !change.Saved() {
 	t.Fatal("handler did not update the session")

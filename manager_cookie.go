@@ -13,17 +13,16 @@ import (
 
 type cookieStore[T any] struct {
 	aead           cipher.AEAD
-	codec          codec[T]
 	cookieSettings SessionCookieOpts
 }
 
-func (s *cookieStore[T]) load(r *http.Request) (persistedSession[T], []byte, error) {
+func (s *cookieStore[T]) load(r *http.Request) ([]byte, bool, error) {
 	cookie, err := r.Cookie(s.cookieSettings.Name)
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
-			return persistedSession[T]{}, nil, nil
+			return nil, false, nil
 		}
-		return persistedSession[T]{}, nil, fmt.Errorf("getting cookie %s: %w", s.cookieSettings.Name, err)
+		return nil, false, fmt.Errorf("getting cookie %s: %w", s.cookieSettings.Name, err)
 	}
 
 	cookieValue := cookie.Value
@@ -31,7 +30,7 @@ func (s *cookieStore[T]) load(r *http.Request) (persistedSession[T], []byte, err
 	// Split and validate format: magic.encodedData
 	sp := strings.SplitN(cookieValue, ".", 2)
 	if len(sp) != 2 {
-		return persistedSession[T]{}, nil, nil
+		return nil, false, nil
 	}
 
 	magic := sp[0]
@@ -40,45 +39,33 @@ func (s *cookieStore[T]) load(r *http.Request) (persistedSession[T], []byte, err
 	// Decode
 	decodedData, err := managerCookieValueEncoding.DecodeString(encodedData)
 	if err != nil {
-		return persistedSession[T]{}, nil, nil
+		return nil, false, nil
 	}
 
 	// Validate magic
 	if magic != managerCookieMagic {
-		return persistedSession[T]{}, nil, nil
+		return nil, false, nil
 	}
 
 	// Decrypt using AEAD with domain separated AD
 	decryptedData, err := openAEAD(s.aead, decodedData, []byte(s.cookieSettings.Name))
 	if err != nil {
-		return persistedSession[T]{}, nil, nil
+		return nil, false, nil
 	}
 
 	// Check expiry
 	if len(decryptedData) < 8 {
-		return persistedSession[T]{}, nil, nil
+		return nil, false, nil
 	}
 	expiresAt := time.Unix(int64(binary.LittleEndian.Uint64(decryptedData[:8])), 0)
 	if expiresAt.Before(time.Now()) {
-		return persistedSession[T]{}, nil, nil
+		return nil, false, nil
 	}
 
-	// Decode using the codec
-	sess, err := s.codec.Decode(decryptedData[8:])
-	if err != nil {
-		return persistedSession[T]{}, nil, fmt.Errorf("decoding session: %w", err)
-	}
-
-	return sess, decryptedData[8:], nil
+	return decryptedData[8:], true, nil
 }
 
-func (s *cookieStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, sess persistedSession[T]) error {
-	// Encode using the codec
-	data, err := s.codec.Encode(sess)
-	if err != nil {
-		return fmt.Errorf("encoding session: %w", err)
-	}
-
+func (s *cookieStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
 	return s.writeCookie(w, expiresAt, data)
 }
 
@@ -125,12 +112,12 @@ func openAEAD(aead cipher.AEAD, sealed, additionalData []byte) ([]byte, error) {
 	return aead.Open(nil, sealed[:nonceSize], sealed[nonceSize:], additionalData)
 }
 
-//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
+//nolint:unused // Implements sessionStore. golangci-lint does not resolve the generic interface implementation.
 func (s *cookieStore[T]) delete(r *http.Request) error {
 	return nil
 }
 
-//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
+//nolint:unused // Implements sessionStore. golangci-lint does not resolve the generic interface implementation.
 func (s *cookieStore[T]) touch(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
 	return s.writeCookie(w, expiresAt, data)
 }

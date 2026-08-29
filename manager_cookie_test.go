@@ -59,11 +59,13 @@ func TestCookieStoreRoundTrip(t *testing.T) {
 	store := mgr.store.(*cookieStore[testSessionData])
 	expiresAt := time.Now().Add(time.Hour)
 	w := httptest.NewRecorder()
-	want := persistedSession[testSessionData]{
-		Data:      testSessionData{User: "alice", Number: 42},
-		CreatedAt: time.Now(),
+	wantData := testSessionData{User: "alice", Number: 42}
+	meta := sessionMeta{CreatedAt: time.Now()}
+	payload, err := mgr.codec.MarshalPayload(&wantData)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := store.save(w, httptest.NewRequest(http.MethodGet, "/", nil), expiresAt, want); err != nil {
+	if err := store.save(w, httptest.NewRequest(http.MethodGet, "/", nil), expiresAt, mustEncodeSession(t, mgr, meta, payload)); err != nil {
 		t.Fatal(err)
 	}
 	cookies := w.Result().Cookies()
@@ -73,12 +75,23 @@ func TestCookieStoreRoundTrip(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.AddCookie(cookies[0])
-	got, encoded, err := store.load(r)
+	encoded, found, err := store.load(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if encoded == nil || got.Data != want.Data || !got.CreatedAt.Equal(want.CreatedAt) {
-		t.Fatalf("loaded session = %#v, encoded %d bytes", got, len(encoded))
+	if !found || encoded == nil {
+		t.Fatalf("loaded session = %#v", encoded)
+	}
+	gotMeta, gotPayload, err := mgr.codec.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotData testSessionData
+	if err := mgr.codec.UnmarshalPayload(gotPayload, &gotData); err != nil {
+		t.Fatal(err)
+	}
+	if gotData != wantData || !gotMeta.CreatedAt.Equal(meta.CreatedAt) {
+		t.Fatalf("loaded data = %#v", gotData)
 	}
 }
 
@@ -88,24 +101,29 @@ func TestCookieStoreRejectsExpiredTamperedAndWrongContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := mgr.store.(*cookieStore[testSessionData])
-	sess := persistedSession[testSessionData]{CreatedAt: time.Now()}
+	createdAt := time.Now()
+	zeroData := testSessionData{}
 
 	t.Run("expired", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		if err := store.save(w, httptest.NewRequest(http.MethodGet, "/", nil), time.Now().Add(-time.Second), sess); err != nil {
+		payload := mustPayload(t, mgr, &zeroData)
+		encoded := mustEncodeSession(t, mgr, sessionMeta{CreatedAt: createdAt}, payload)
+		if err := store.save(w, httptest.NewRequest(http.MethodGet, "/", nil), time.Now().Add(-time.Second), encoded); err != nil {
 			t.Fatal(err)
 		}
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.AddCookie(w.Result().Cookies()[0])
-		_, encoded, err := store.load(r)
-		if err != nil || encoded != nil {
+		encoded, found, err := store.load(r)
+		if err != nil || found || encoded != nil {
 			t.Fatalf("expired load = %d bytes, %v", len(encoded), err)
 		}
 	})
 
 	t.Run("tampered", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		if err := store.save(w, httptest.NewRequest(http.MethodGet, "/", nil), time.Now().Add(time.Hour), sess); err != nil {
+		payload := mustPayload(t, mgr, &zeroData)
+		encoded := mustEncodeSession(t, mgr, sessionMeta{CreatedAt: createdAt}, payload)
+		if err := store.save(w, httptest.NewRequest(http.MethodGet, "/", nil), time.Now().Add(time.Hour), encoded); err != nil {
 			t.Fatal(err)
 		}
 		cookie := w.Result().Cookies()[0]
@@ -118,15 +136,17 @@ func TestCookieStoreRejectsExpiredTamperedAndWrongContext(t *testing.T) {
 		cookie.Value = parts[0] + "." + managerCookieValueEncoding.EncodeToString(sealed)
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.AddCookie(cookie)
-		_, encoded, err := store.load(r)
-		if err != nil || encoded != nil {
+		encoded, found, err := store.load(r)
+		if err != nil || found || encoded != nil {
 			t.Fatalf("tampered load = %d bytes, %v", len(encoded), err)
 		}
 	})
 
 	t.Run("cookie name additional data", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		if err := store.save(w, httptest.NewRequest(http.MethodGet, "/", nil), time.Now().Add(time.Hour), sess); err != nil {
+		payload := mustPayload(t, mgr, &zeroData)
+		encoded := mustEncodeSession(t, mgr, sessionMeta{CreatedAt: createdAt}, payload)
+		if err := store.save(w, httptest.NewRequest(http.MethodGet, "/", nil), time.Now().Add(time.Hour), encoded); err != nil {
 			t.Fatal(err)
 		}
 		cookie := w.Result().Cookies()[0]
@@ -135,8 +155,8 @@ func TestCookieStoreRejectsExpiredTamperedAndWrongContext(t *testing.T) {
 		other.cookieSettings.Name = cookie.Name
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.AddCookie(cookie)
-		_, encoded, err := other.load(r)
-		if err != nil || encoded != nil {
+		encoded, found, err := other.load(r)
+		if err != nil || found || encoded != nil {
 			t.Fatalf("cross-context load = %d bytes, %v", len(encoded), err)
 		}
 	})
@@ -151,11 +171,29 @@ func TestCookieStoreRejectsExpiredTamperedAndWrongContext(t *testing.T) {
 			Name:  store.cookieSettings.Name,
 			Value: managerCookieMagic + "." + managerCookieValueEncoding.EncodeToString(sealed),
 		})
-		_, encoded, err := store.load(r)
-		if err != nil || encoded != nil {
+		encoded, found, err := store.load(r)
+		if err != nil || found || encoded != nil {
 			t.Fatalf("short payload load = %d bytes, %v", len(encoded), err)
 		}
 	})
+}
+
+func mustPayload[T any](t *testing.T, m *Manager[T], value *T) []byte {
+	t.Helper()
+	p, err := m.codec.MarshalPayload(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func mustEncodeSession[T any](t *testing.T, m *Manager[T], meta sessionMeta, payload []byte) []byte {
+	t.Helper()
+	b, err := m.codec.Encode(meta, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func TestCookieStoreRejectsOversizedValue(t *testing.T) {
@@ -185,7 +223,7 @@ func TestCookieManagerAESGCMKeyRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	seed := oldManager.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setTestUser(oldManager.FromContext(r.Context()), "alice")
+		saveTestUser(oldManager.FromContext(r.Context()), "alice")
 	}))
 	seedResponse := httptest.NewRecorder()
 	seed.ServeHTTP(seedResponse, httptest.NewRequest(http.MethodGet, "/", nil))

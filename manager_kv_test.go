@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,18 @@ import (
 	"testing"
 	"time"
 )
+
+type snapshotErrorData struct {
+	Value string `json:"value"`
+}
+
+func (d *snapshotErrorData) MarshalJSON() ([]byte, error) {
+	if d.Value == "fail" {
+		return nil, errors.New("snapshot failed")
+	}
+	type plain snapshotErrorData
+	return json.Marshal((*plain)(d))
+}
 
 func newTestAuthenticator(t *testing.T, current byte, previous ...byte) Authenticator {
 	t.Helper()
@@ -122,7 +135,7 @@ func TestKVManager_LazyLoad_skipsKVWithoutSessionAccess(t *testing.T) {
 
 	// Seed a session directly in KV.
 	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setTestUser(mgr.FromContext(r.Context()), "alice")
+		saveTestUser(mgr.FromContext(r.Context()), "alice")
 		w.WriteHeader(http.StatusOK)
 	}))
 	rrSeed := httptest.NewRecorder()
@@ -164,7 +177,7 @@ func TestKVManager_LazyLoad_loadsOnSessionAccess(t *testing.T) {
 	}
 
 	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setTestUser(mgr.FromContext(r.Context()), "alice")
+		saveTestUser(mgr.FromContext(r.Context()), "alice")
 	}))
 	rrSeed := httptest.NewRecorder()
 	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
@@ -199,7 +212,7 @@ func TestKVManager_EagerLoad_hitsKVOnEveryRequest(t *testing.T) {
 	}
 
 	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setTestUser(mgr.FromContext(r.Context()), "alice")
+		saveTestUser(mgr.FromContext(r.Context()), "alice")
 	}))
 	rrSeed := httptest.NewRecorder()
 	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
@@ -270,7 +283,7 @@ func TestKVManager_replacesUnknownCookie(t *testing.T) {
 
 	bareID := "AAAAAAAAAAAAAAAAAAAAAAAAAA"
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setTestUser(mgr.FromContext(r.Context()), "v")
+		saveTestUser(mgr.FromContext(r.Context()), "v")
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -300,7 +313,7 @@ func TestKVManager_SessionIDAuthenticatorRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	seed := oldManager.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setTestUser(oldManager.FromContext(r.Context()), "alice")
+		saveTestUser(oldManager.FromContext(r.Context()), "alice")
 	}))
 	seedResponse := httptest.NewRecorder()
 	seed.ServeHTTP(seedResponse, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -357,7 +370,7 @@ func TestKVManager_skipsOversizedIDLookup(t *testing.T) {
 	}
 
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setTestUser(mgr.FromContext(r.Context()), "v")
+		saveTestUser(mgr.FromContext(r.Context()), "v")
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: mgr.cookieSettings.Name, Value: strings.Repeat("x", 129)})
@@ -382,7 +395,7 @@ func TestSession_IsNew(t *testing.T) {
 			if !sess.IsNew() {
 				t.Fatal("first visit should be new")
 			}
-			setTestUser(sess, "alice")
+			saveTestUser(sess, "alice")
 		}))
 		rrSeed := httptest.NewRecorder()
 		seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
@@ -426,7 +439,7 @@ func TestSession_IsNew(t *testing.T) {
 
 		var cookies []*http.Cookie
 		seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			setTestUser(mgr.FromContext(r.Context()), "v")
+			saveTestUser(mgr.FromContext(r.Context()), "v")
 		}))
 		rrSeed := httptest.NewRecorder()
 		seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -454,7 +467,7 @@ func TestSession_IsNew(t *testing.T) {
 
 		var cookies []*http.Cookie
 		seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			setTestUser(mgr.FromContext(r.Context()), "v")
+			saveTestUser(mgr.FromContext(r.Context()), "v")
 		}))
 		rrSeed := httptest.NewRecorder()
 		seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -479,12 +492,12 @@ func TestSession_IsNew(t *testing.T) {
 	})
 }
 
-func TestKVManager_OnloadKeepTransformsInMemoryOnly(t *testing.T) {
+func TestKVManager_OnloadUseTransformsInMemoryOnly(t *testing.T) {
 	kv := &memoryKV{contents: make(map[string]kvItem)}
 	mgr, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{
-		Onload: func(data testSessionData) (testSessionData, bool) {
+		Onload: func(data *testSessionData) (OnloadAction, error) {
 			data.User = "onload-" + data.User
-			return data, true
+			return OnloadUse, nil
 		},
 	})
 	if err != nil {
@@ -492,16 +505,18 @@ func TestKVManager_OnloadKeepTransformsInMemoryOnly(t *testing.T) {
 	}
 
 	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setTestUser(mgr.FromContext(r.Context()), "alice")
+		saveTestUser(mgr.FromContext(r.Context()), "alice")
 		w.WriteHeader(http.StatusOK)
 	}))
 	rrSeed := httptest.NewRecorder()
 	seed.ServeHTTP(rrSeed, httptest.NewRequest(http.MethodGet, "/seed", nil))
 	cookies := rrSeed.Result().Cookies()
 
-	var got testSessionData
+	var got *testSessionData
 	read := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = mgr.FromContext(r.Context()).Get()
+		sess := mgr.FromContext(r.Context())
+		got = sess.Get()
+		sess.AddFlash(Flash{Message: "metadata write"})
 		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/read", nil)
@@ -518,8 +533,12 @@ func TestKVManager_OnloadKeepTransformsInMemoryOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored := plain.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := plain.FromContext(r.Context()).Get().User; got != "alice" {
+		sess := plain.FromContext(r.Context())
+		if got := sess.Get().User; got != "alice" {
 			t.Fatalf("stored user = %q, want alice", got)
+		}
+		if flashes := sess.TakeFlashes(); len(flashes) != 1 || flashes[0].Message != "metadata write" {
+			t.Fatalf("stored flashes = %#v", flashes)
 		}
 	}))
 	reqStored := httptest.NewRequest(http.MethodGet, "/stored", nil)
@@ -529,11 +548,11 @@ func TestKVManager_OnloadKeepTransformsInMemoryOnly(t *testing.T) {
 	stored.ServeHTTP(httptest.NewRecorder(), reqStored)
 }
 
-func TestKVManager_OnloadFalseDeletesSession(t *testing.T) {
+func TestKVManager_OnloadDeleteDeletesSession(t *testing.T) {
 	kv := &memoryKV{contents: make(map[string]kvItem)}
 	mgr, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{
-		Onload: func(testSessionData) (testSessionData, bool) {
-			return testSessionData{}, false
+		Onload: func(*testSessionData) (OnloadAction, error) {
+			return OnloadDelete, nil
 		},
 	})
 	if err != nil {
@@ -541,7 +560,7 @@ func TestKVManager_OnloadFalseDeletesSession(t *testing.T) {
 	}
 
 	seed := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setTestUser(mgr.FromContext(r.Context()), "alice")
+		saveTestUser(mgr.FromContext(r.Context()), "alice")
 		w.WriteHeader(http.StatusOK)
 	}))
 	rrSeed := httptest.NewRecorder()
@@ -551,7 +570,7 @@ func TestKVManager_OnloadFalseDeletesSession(t *testing.T) {
 		t.Fatalf("seed stored %d keys, want 1", len(kv.contents))
 	}
 
-	var got testSessionData
+	var got *testSessionData
 	var isNew bool
 	drop := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sess := mgr.FromContext(r.Context())
@@ -565,14 +584,14 @@ func TestKVManager_OnloadFalseDeletesSession(t *testing.T) {
 	}
 	rr := httptest.NewRecorder()
 	drop.ServeHTTP(rr, req)
-	if got != (testSessionData{}) {
+	if *got != (testSessionData{}) {
 		t.Fatalf("Get after Onload drop = %#v, want zero", got)
 	}
 	if !isNew {
 		t.Fatal("dropped session should be new")
 	}
 	if len(kv.contents) != 0 {
-		t.Fatalf("Onload false should delete KV session, got %d keys", len(kv.contents))
+		t.Fatalf("OnloadDelete should delete KV session, got %d keys", len(kv.contents))
 	}
 	cleared := false
 	for _, c := range rr.Result().Cookies() {
@@ -581,6 +600,453 @@ func TestKVManager_OnloadFalseDeletesSession(t *testing.T) {
 		}
 	}
 	if !cleared {
-		t.Fatal("Onload false should clear the session cookie")
+		t.Fatal("OnloadDelete should clear the session cookie")
+	}
+}
+
+func TestKVManager_OnloadSavePersistsTransformation(t *testing.T) {
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	seedManager, err := NewKVManager[testSessionData](kv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := seedManager.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		saveTestUser(seedManager.FromContext(r.Context()), "alice")
+	}))
+	_, cookies := contractRequest(t, seed, nil)
+
+	loadManager, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{
+		Onload: func(data *testSessionData) (OnloadAction, error) {
+			data.User = "migrated-" + data.User
+			return OnloadSave, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	load := loadManager.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		data := loadManager.FromContext(r.Context()).Get()
+		if got := data.User; got != "migrated-alice" {
+			t.Fatalf("Onload data = %q", got)
+		}
+		data.User = "handler-unsaved"
+	}))
+	_, cookies = contractRequest(t, load, cookies)
+
+	plain, err := NewKVManager[testSessionData](kv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := plain.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if got := plain.FromContext(r.Context()).Get().User; got != "migrated-alice" {
+			t.Fatalf("persisted data = %q", got)
+		}
+	}))
+	contractRequest(t, read, cookies)
+}
+
+func TestKVManager_OnloadErrorDoesNotWriteOrDelete(t *testing.T) {
+	for _, eager := range []bool{false, true} {
+		name := "lazy"
+		if eager {
+			name = "eager"
+		}
+		t.Run(name, func(t *testing.T) {
+			kv := &memoryKV{contents: make(map[string]kvItem)}
+			seedManager, err := NewKVManager[testSessionData](kv, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := seedManager.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				saveTestUser(seedManager.FromContext(r.Context()), "alice")
+			}))
+			_, cookies := contractRequest(t, seed, nil)
+			if len(kv.contents) != 1 {
+				t.Fatalf("seeded entries = %d", len(kv.contents))
+			}
+			var key string
+			var before kvItem
+			for key, before = range kv.contents {
+				before.data = append([]byte(nil), before.data...)
+			}
+
+			loadManager, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{
+				EagerLoad:   eager,
+				IdleTimeout: time.Hour,
+				Onload: func(data *testSessionData) (OnloadAction, error) {
+					data.User = "must-not-persist"
+					return OnloadDelete, errors.New("migration unavailable")
+				},
+				ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+					if !strings.Contains(err.Error(), "migration unavailable") {
+						t.Errorf("error = %v", err)
+					}
+					http.Error(w, "load failed", http.StatusServiceUnavailable)
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handlerCalled := false
+			load := loadManager.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				handlerCalled = true
+				_ = loadManager.FromContext(r.Context()).Get()
+			}))
+			recorder, _ := contractRequest(t, load, cookies)
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d", recorder.Code)
+			}
+			if eager && handlerCalled {
+				t.Fatal("eager Onload failure ran application handler")
+			}
+			if !eager && !handlerCalled {
+				t.Fatal("lazy Onload failure was not discovered by handler access")
+			}
+			after, ok := kv.contents[key]
+			if !ok || !bytes.Equal(after.data, before.data) || !after.expiresAt.Equal(before.expiresAt) || len(kv.contents) != 1 {
+				t.Fatalf("stored session changed after Onload error: before=%#v after=%#v", before, after)
+			}
+		})
+	}
+}
+
+func TestKVManager_UnknownOnloadActionIsManagerError(t *testing.T) {
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	seedManager, err := NewKVManager[testSessionData](kv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := seedManager.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		saveTestUser(seedManager.FromContext(r.Context()), "alice")
+	}))
+	_, cookies := contractRequest(t, seed, nil)
+
+	var handled error
+	loadManager, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{
+		EagerLoad: true,
+		Onload: func(*testSessionData) (OnloadAction, error) {
+			return OnloadAction(255), nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			handled = err
+			w.WriteHeader(http.StatusInternalServerError)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	load := loadManager.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("handler ran after invalid Onload action")
+	}))
+	contractRequest(t, load, cookies)
+	if handled == nil || !strings.Contains(handled.Error(), "unknown session Onload action 255") {
+		t.Fatalf("handled error = %v", handled)
+	}
+	if len(kv.contents) != 1 {
+		t.Fatalf("invalid action changed store: %d entries", len(kv.contents))
+	}
+}
+
+func TestKVManager_OnloadSaveSnapshotErrorDoesNotWrite(t *testing.T) {
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	seedManager, err := NewKVManager[snapshotErrorData](kv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := seedManager.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		s := seedManager.FromContext(r.Context())
+		s.Get().Value = "stored"
+		s.Save()
+	}))
+	_, cookies := contractRequest(t, seed, nil)
+	var before kvItem
+	for _, before = range kv.contents {
+		before.data = append([]byte(nil), before.data...)
+	}
+
+	var handled error
+	loadManager, err := NewKVManager[snapshotErrorData](kv, &KVManagerOpts[snapshotErrorData]{
+		EagerLoad: true,
+		Onload: func(data *snapshotErrorData) (OnloadAction, error) {
+			data.Value = "fail"
+			return OnloadSave, nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			handled = err
+			w.WriteHeader(http.StatusInternalServerError)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	load := loadManager.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("handler ran after OnloadSave snapshot error")
+	}))
+	contractRequest(t, load, cookies)
+	if handled == nil || !strings.Contains(handled.Error(), "snapshot failed") {
+		t.Fatalf("handled error = %v", handled)
+	}
+	if len(kv.contents) != 1 {
+		t.Fatalf("entries = %d", len(kv.contents))
+	}
+	for _, after := range kv.contents {
+		if !bytes.Equal(after.data, before.data) || !after.expiresAt.Equal(before.expiresAt) {
+			t.Fatal("OnloadSave snapshot error changed stored session")
+		}
+	}
+}
+
+func TestKVManager_OnloadRunsForNullPayload(t *testing.T) {
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	m, err := NewKVManager[testSessionData](kv, &KVManagerOpts[testSessionData]{
+		EagerLoad: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "null-data-session"
+	blob, err := m.codec.Encode(sessionMeta{CreatedAt: time.Now()}, []byte("null"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kv.Set(context.Background(), managerHashSessionID(sessionID), time.Now().Add(time.Hour), blob); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	m.opts.Onload = func(data *testSessionData) (OnloadAction, error) {
+		called = true
+		data.User = "from-null"
+		return OnloadUse, nil
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: m.cookieSettings.Name, Value: sessionID})
+	m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		data := m.FromContext(r.Context()).Get()
+		if data == nil || data.User != "from-null" {
+			t.Fatalf("Get() = %#v", data)
+		}
+	})).ServeHTTP(httptest.NewRecorder(), req)
+	if !called {
+		t.Fatal("Onload did not run for a found null payload")
+	}
+}
+
+func TestKVManagerMetadataWriteDoesNotCaptureUnsavedData(t *testing.T) {
+	for _, selected := range []Codec{nil, GobCodec{}} {
+		name := "json"
+		if selected != nil {
+			name = "gob"
+		}
+		t.Run(name, func(t *testing.T) {
+			m, err := NewKVManager[testSessionData](NewMemoryKV(), &KVManagerOpts[testSessionData]{Codec: selected})
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				s := m.FromContext(r.Context())
+				s.Get().User = "stored"
+				s.Save()
+			}))
+			_, cookies := contractRequest(t, seed, nil)
+
+			add := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				s := m.FromContext(r.Context())
+				s.Get().User = "unsaved"
+				s.AddFlash(Flash{Message: "notice"})
+			}))
+			_, cookies = contractRequest(t, add, cookies)
+
+			read := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				s := m.FromContext(r.Context())
+				if got := s.Get().User; got != "stored" {
+					t.Fatalf("persisted user = %q", got)
+				}
+				if flashes := s.TakeFlashes(); len(flashes) != 1 || flashes[0].Message != "notice" {
+					t.Fatalf("flashes = %#v", flashes)
+				}
+			}))
+			contractRequest(t, read, cookies)
+		})
+	}
+}
+
+func TestKVManagerMetadataWriteDoesNotCaptureNestedMutation(t *testing.T) {
+	type nestedData struct {
+		Labels map[string]string
+	}
+	for _, selected := range []Codec{nil, GobCodec{}} {
+		name := "json"
+		if selected != nil {
+			name = "gob"
+		}
+		t.Run(name, func(t *testing.T) {
+			m, err := NewKVManager[nestedData](NewMemoryKV(), &KVManagerOpts[nestedData]{Codec: selected})
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				s := m.FromContext(r.Context())
+				s.Get().Labels = map[string]string{"role": "reader"}
+				s.Save()
+			}))
+			_, cookies := contractRequest(t, seed, nil)
+
+			mutate := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				s := m.FromContext(r.Context())
+				s.Get().Labels["role"] = "admin"
+				s.AddFlash(Flash{Message: "notice"})
+			}))
+			_, cookies = contractRequest(t, mutate, cookies)
+
+			read := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				if got := m.FromContext(r.Context()).Get().Labels["role"]; got != "reader" {
+					t.Fatalf("persisted nested mutation = %q", got)
+				}
+			}))
+			contractRequest(t, read, cookies)
+		})
+	}
+}
+
+func TestKVManagerFreshMetadataWriteUsesZeroPayload(t *testing.T) {
+	for _, selected := range []Codec{nil, GobCodec{}} {
+		name := "json"
+		if selected != nil {
+			name = "gob"
+		}
+		t.Run(name, func(t *testing.T) {
+			m, err := NewKVManager[testSessionData](NewMemoryKV(), &KVManagerOpts[testSessionData]{Codec: selected})
+			if err != nil {
+				t.Fatal(err)
+			}
+			write := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				s := m.FromContext(r.Context())
+				s.Get().User = "unsaved"
+				s.AddFlash(Flash{Message: "notice"})
+			}))
+			_, cookies := contractRequest(t, write, nil)
+
+			read := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				s := m.FromContext(r.Context())
+				if got := s.Get().User; got != "" {
+					t.Fatalf("fresh metadata write persisted user %q", got)
+				}
+				if flashes := s.TakeFlashes(); len(flashes) != 1 || flashes[0].Message != "notice" {
+					t.Fatalf("flashes = %#v", flashes)
+				}
+			}))
+			contractRequest(t, read, cookies)
+		})
+	}
+}
+
+func TestKVManagerSnapshotErrorsAreDeferredAndRecoverable(t *testing.T) {
+	t.Run("failed Save has no persistence effects", func(t *testing.T) {
+		kv := &memoryKV{contents: make(map[string]kvItem)}
+		var handled error
+		m, err := NewKVManager[snapshotErrorData](kv, &KVManagerOpts[snapshotErrorData]{
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+				handled = err
+				w.WriteHeader(http.StatusInternalServerError)
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		write := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			s := m.FromContext(r.Context())
+			s.Get().Value = "fail"
+			s.Save()
+		}))
+		recorder, _ := contractRequest(t, write, nil)
+		if recorder.Code != http.StatusInternalServerError || handled == nil || len(kv.contents) != 0 {
+			t.Fatalf("status=%d error=%v entries=%d", recorder.Code, handled, len(kv.contents))
+		}
+		if len(recorder.Result().Cookies()) != 0 {
+			t.Fatalf("failed snapshot emitted cookies: %#v", recorder.Result().Cookies())
+		}
+	})
+
+	t.Run("later successful Save clears error", func(t *testing.T) {
+		m, err := NewKVManager[snapshotErrorData](NewMemoryKV(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			s := m.FromContext(r.Context())
+			s.Get().Value = "fail"
+			s.Save()
+			s.Get().Value = "recovered"
+			s.Save()
+		}))
+		_, cookies := contractRequest(t, write, nil)
+		read := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			if got := m.FromContext(r.Context()).Get().Value; got != "recovered" {
+				t.Fatalf("persisted value = %q", got)
+			}
+		}))
+		contractRequest(t, read, cookies)
+	})
+}
+
+func TestKVManagerFailedResetDoesNotDeleteOldSession(t *testing.T) {
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	m, err := NewKVManager[snapshotErrorData](kv, &KVManagerOpts[snapshotErrorData]{
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			w.WriteHeader(http.StatusInternalServerError)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		s := m.FromContext(r.Context())
+		s.Get().Value = "stored"
+		s.Save()
+	}))
+	_, cookies := contractRequest(t, seed, nil)
+	if len(kv.contents) != 1 {
+		t.Fatalf("seeded entries = %d", len(kv.contents))
+	}
+
+	reset := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		s := m.FromContext(r.Context())
+		s.Get().Value = "fail"
+		s.Reset()
+	}))
+	recorder, _ := contractRequest(t, reset, cookies)
+	if recorder.Code != http.StatusInternalServerError || len(kv.contents) != 1 {
+		t.Fatalf("status=%d entries=%d", recorder.Code, len(kv.contents))
+	}
+	read := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if got := m.FromContext(r.Context()).Get().Value; got != "stored" {
+			t.Fatalf("old session data = %q", got)
+		}
+	}))
+	contractRequest(t, read, cookies)
+}
+
+func TestKVManagerDeleteOverridesPendingSnapshotError(t *testing.T) {
+	kv := &memoryKV{contents: make(map[string]kvItem)}
+	m, err := NewKVManager[snapshotErrorData](kv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		s := m.FromContext(r.Context())
+		s.Get().Value = "stored"
+		s.Save()
+	}))
+	_, cookies := contractRequest(t, seed, nil)
+
+	remove := m.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		s := m.FromContext(r.Context())
+		s.Get().Value = "fail"
+		s.Save()
+		s.Delete()
+	}))
+	contractRequest(t, remove, cookies)
+	if len(kv.contents) != 0 {
+		t.Fatalf("Delete left %d entries after failed Save", len(kv.contents))
 	}
 }

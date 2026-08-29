@@ -47,9 +47,8 @@ func TestWithSessionTracksDataAndFlash(t *testing.T) {
 		if got := sess.TakeFlashes(); len(got) != 2 || got[0].Message != "sign in again" || got[1].Message != "welcome back" {
 			t.Fatalf("TakeFlashes() = %#v", got)
 		}
-		data := sess.Get()
-		data.UserID = "bob"
-		sess.Set(data)
+		sess.Get().UserID = "bob"
+		sess.Save()
 	})
 	handler.ServeHTTP(httptest.NewRecorder(), request)
 
@@ -61,6 +60,41 @@ func TestWithSessionTracksDataAndFlash(t *testing.T) {
 	}
 	if got := change.Flashes(); len(got) != 0 {
 		t.Fatalf("consumed flashes remain: %#v", got)
+	}
+}
+
+func TestWithSessionPassesThroughManagerWrap(t *testing.T) {
+	manager := newManager(t)
+	request, change := sessiontest.WithSession(
+		t,
+		httptest.NewRequest(http.MethodGet, "/", nil),
+		manager,
+		sessionData{UserID: "fixture"},
+	)
+	manager.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		sess := manager.FromContext(request.Context())
+		if got := sess.Get().UserID; got != "fixture" {
+			t.Fatalf("fixture user = %q", got)
+		}
+		sess.Get().UserID = "changed"
+		sess.Save()
+	})).ServeHTTP(httptest.NewRecorder(), request)
+	if !change.Saved() || change.Data().UserID != "changed" {
+		t.Fatalf("change = saved %v data %#v", change.Saved(), change.Data())
+	}
+}
+
+func TestWithSessionMetadataOnlyChangeIsNotSavedData(t *testing.T) {
+	manager := newManager(t)
+	request, change := sessiontest.WithSession(
+		t,
+		httptest.NewRequest(http.MethodGet, "/", nil),
+		manager,
+		sessionData{},
+	)
+	manager.FromContext(request.Context()).AddFlash(session.Flash{Message: "notice"})
+	if change.Saved() {
+		t.Fatal("metadata-only change reported application data as saved")
 	}
 }
 
