@@ -1,5 +1,4 @@
-// Package sessiontest provides helpers for unit testing handlers that use
-// package session.
+// Package sessiontest provides fixtures for handlers that use package session.
 package sessiontest
 
 import (
@@ -15,8 +14,8 @@ type config struct {
 	flashes []session.Flash
 }
 
-// Option configures a session attached by WithSession. Only options provided
-// by this package are supported.
+// Option configures a session attached by WithSession. Options are created by
+// this package.
 type Option interface {
 	apply(*config)
 }
@@ -48,8 +47,7 @@ func WithFlashError(message string) Option {
 	})
 }
 
-// AsNewSession makes the attached session report IsNew as true. Sessions with
-// initial data are treated as existing by default.
+// AsNewSession makes the attached session report IsNew.
 func AsNewSession() Option {
 	return optionFunc(func(config *config) {
 		config.isNew = true
@@ -64,7 +62,8 @@ type Change[T any] struct {
 // Data returns the session's current application data.
 func (c *Change[T]) Data() T { return c.state.Snapshot().Data }
 
-// Saved reports whether the session was marked for saving.
+// Saved reports whether Save or Reset was called. Metadata-only changes do not
+// set Saved.
 func (c *Change[T]) Saved() bool { return c.state.Snapshot().Saved }
 
 // Deleted reports whether the session was marked for deletion.
@@ -89,10 +88,9 @@ func (c *Change[T]) Flashes() []session.Flash {
 	return flashes
 }
 
-// WithSession attaches a session to request for a unit test. The returned
-// request must be passed to the code under test. Change reflects mutations made
-// through manager.FromContext. WithSession does not run the manager middleware
-// or persist the resulting session.
+// WithSession attaches a fixture to request and returns a Change that tracks
+// session operations. The fixture also passes through Manager.Wrap without
+// accessing production storage or cookies.
 func WithSession[T any](
 	t testing.TB,
 	request *http.Request,

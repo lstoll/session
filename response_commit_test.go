@@ -15,8 +15,9 @@ func TestSessionMutationAfterResponseCommitPanics(t *testing.T) {
 		mutate  func(*Session[testSessionData], http.ResponseWriter, *http.Request)
 	}
 	operations := []operation{
-		{name: "Set", mutate: func(s *Session[testSessionData], _ http.ResponseWriter, _ *http.Request) {
-			s.Set(testSessionData{Bootstrap: "after"})
+		{name: "Save", mutate: func(s *Session[testSessionData], _ http.ResponseWriter, _ *http.Request) {
+			*s.Get() = testSessionData{Bootstrap: "after"}
+			s.Save()
 		}},
 		{name: "Delete", mutate: func(s *Session[testSessionData], _ http.ResponseWriter, _ *http.Request) { s.Delete() }},
 		{name: "Reset", mutate: func(s *Session[testSessionData], _ http.ResponseWriter, _ *http.Request) { s.Reset() }},
@@ -49,7 +50,8 @@ func TestSessionMutationAfterResponseCommitPanics(t *testing.T) {
 			handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				defer func() { panicValue = recover() }()
 				sess := mgr.FromContext(r.Context())
-				sess.Set(testSessionData{Bootstrap: "before"})
+				*sess.Get() = testSessionData{Bootstrap: "before"}
+				sess.Save()
 				if op.prepare != nil {
 					op.prepare(sess)
 				}
@@ -73,7 +75,8 @@ func TestSessionReadsAfterResponseCommit(t *testing.T) {
 	}
 	handler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sess := mgr.FromContext(r.Context())
-		sess.Set(testSessionData{Bootstrap: "value"})
+		*sess.Get() = testSessionData{Bootstrap: "value"}
+		sess.Save()
 		w.WriteHeader(http.StatusOK)
 
 		if got := sess.Get().Bootstrap; got != "value" {

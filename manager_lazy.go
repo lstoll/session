@@ -29,6 +29,9 @@ func (m *Manager[T]) isDBSCRefreshRequest(r *http.Request) bool {
 // managers it also runs in-band DBSC enforcement. Returns true when the
 // response has been handled and the request should not continue.
 func (m *Manager[T]) ensureSessionLoaded(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
+	if sctx.loadFailed {
+		return true
+	}
 	if !m.lazyLoad {
 		return sctx.aborted
 	}
@@ -36,16 +39,20 @@ func (m *Manager[T]) ensureSessionLoaded(w http.ResponseWriter, r *http.Request,
 		return sctx.aborted
 	}
 
-	decodedData, data, err := m.loadSession(r)
+	data, found, err := m.loadSession(r)
 	if err != nil {
 		m.handleErr(w, r, err)
-		sctx.aborted = true
+		sctx.loadFailed = true
 		return true
 	}
-	m.installLoadedSession(sctx, decodedData, data)
+	if err := m.installLoadedSession(sctx, data, found); err != nil {
+		m.handleErr(w, r, err)
+		sctx.loadFailed = true
+		return true
+	}
 
 	abort := false
-	if m.opts.DBSCRefreshInterval > 0 && len(sctx.sessdata.DBSCPublicJWK) > 0 {
+	if m.opts.DBSCRefreshInterval > 0 && len(sctx.meta.DBSCPublicJWK) > 0 {
 		abort = m.runDBSCInBand(w, r, sctx)
 	}
 	if abort {
@@ -55,7 +62,7 @@ func (m *Manager[T]) ensureSessionLoaded(w http.ResponseWriter, r *http.Request,
 }
 
 // rejectDBSCSkipped rejects requests where the client could not complete DBSC.
-// Secure-Session-Skipped is a diagnostic header from the browser; it must
+// Secure-Session-Skipped is a diagnostic header from the browser. It must
 // not bypass device binding. Returns true when a 401 was written.
 func (m *Manager[T]) rejectDBSCSkipped(w http.ResponseWriter, r *http.Request, sessionID string) bool {
 	if !dbscSessionSkipped(r, sessionID) {
@@ -69,14 +76,14 @@ func (m *Manager[T]) rejectDBSCSkipped(w http.ResponseWriter, r *http.Request, s
 // runDBSCInBand enforces device-bound session freshness. Returns true when a
 // challenge or error response was written to w.
 func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx *Session[T]) bool {
-	if m.rejectDBSCSkipped(w, r, sctx.sessdata.DBSCSessionID) {
+	if m.rejectDBSCSkipped(w, r, sctx.meta.DBSCSessionID) {
 		return true
 	}
 
 	boundCookie, err := r.Cookie(m.dbscBoundCookieName())
-	isBoundCookieValid := err == nil && boundCookie.Value != "" && boundCookie.Value == sctx.sessdata.DBSCCurrentCookieID
+	isBoundCookieValid := err == nil && boundCookie.Value != "" && boundCookie.Value == sctx.meta.DBSCCurrentCookieID
 
-	isExpired := sctx.sessdata.DBSCExpiration.IsZero() || time.Now().After(sctx.sessdata.DBSCExpiration)
+	isExpired := sctx.meta.DBSCExpiration.IsZero() || time.Now().After(sctx.meta.DBSCExpiration)
 	if isBoundCookieValid && !isExpired {
 		return false
 	}
@@ -103,8 +110,8 @@ func (m *Manager[T]) runDBSCInBand(w http.ResponseWriter, r *http.Request, sctx 
 
 	consumeDBSCRefreshChallenge(sctx, jti, now)
 
-	sctx.sessdata.DBSCExpiration = now.Add(m.opts.DBSCRefreshInterval)
-	sctx.sessdata.DBSCCurrentCookieID = rand.Text()
-	sctx.state = sessionDirty
+	sctx.meta.DBSCExpiration = now.Add(m.opts.DBSCRefreshInterval)
+	sctx.meta.DBSCCurrentCookieID = rand.Text()
+	sctx.metaDirty = true
 	return false
 }

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -39,36 +40,40 @@ type dbscServeConfig[T any] struct {
 	GenerateRegistrationChallenge func(sctx *Session[T], now time.Time) string
 }
 
-type sessionState uint8
-
-const (
-	sessionClean sessionState = iota
-	sessionDirty
-	sessionDeleted
-)
-
-// Session represents a tracked web session. A Session is scoped to one HTTP
-// request and must not be accessed concurrently by multiple goroutines.
+// Session is a request-scoped session. It is not safe for concurrent use.
 type Session[T any] struct {
-	mgr      *Manager[T]
-	reqW     http.ResponseWriter
-	reqR     *http.Request
-	sessdata persistedSession[T]
-	// loadedData is the original encoded session. Idle-timeout touches use it to
-	// update the persisted timestamp without saving Onload transformations.
-	loadedData []byte
-	state      sessionState
-	rotate     bool
+	mgr            *Manager[T]
+	reqW           http.ResponseWriter
+	reqR           *http.Request
+	meta           sessionMeta
+	working        *T
+	payload        []byte
+	zeroPayload    []byte
+	deleted        bool
+	rotate         bool
+	dataScheduled  bool
+	metaDirty      bool
+	pendingSaveErr error
 
-	isNew   bool
-	loaded  bool
-	aborted bool
+	isNew      bool
+	loaded     bool
+	aborted    bool
+	loadFailed bool
 }
 
-// IsNew reports whether persisted session data has not been loaded from storage.
-// It is true for brand-new sessions and after Reset or Delete. On lazy-loaded
-// managers, it stays true until a session accessor (Get, Set, etc.) triggers
-// the store read.
+func (m *Manager[T]) newRequestSession() *Session[T] {
+	return &Session[T]{
+		mgr:         m,
+		isNew:       true,
+		meta:        sessionMeta{CreatedAt: time.Now()},
+		working:     new(T),
+		payload:     append([]byte(nil), m.zeroPayload...),
+		zeroPayload: append([]byte(nil), m.zeroPayload...),
+	}
+}
+
+// IsNew reports whether the session has no loaded state. It is also true after
+// Reset or Delete. With lazy loading, it remains true until the first access.
 func (s *Session[T]) IsNew() bool {
 	return s.isNew
 }
@@ -86,149 +91,162 @@ func (s *Session[T]) assertMutable(operation string) {
 	}
 }
 
-// Get returns the application data stored in the session.
-//
-// The returned value is a copy of T. If T contains reference types such as
-// maps, slices, or pointers, callers must call Set after making changes so the
-// session is marked for saving.
-func (s *Session[T]) Get() T {
+// Get returns the request's application data. It never returns nil. Call Save
+// after changing the data.
+func (s *Session[T]) Get() *T {
 	s.ensureLoaded()
-	if s.aborted {
-		var zero T
-		return zero
+	if s.working == nil {
+		s.working = new(T)
 	}
-
-	return s.sessdata.Data
+	return s.working
 }
 
-// Set replaces the application data and marks the session for saving.
-func (s *Session[T]) Set(data T) {
+// Save snapshots the current application data for persistence at response
+// commit. Later changes require another Save. Encoding errors are reported to
+// the Manager's ErrorHandler at commit.
+func (s *Session[T]) Save() {
 	s.ensureLoaded()
-	if s.aborted {
+	s.assertMutable("Save")
+	if s.aborted || s.loadFailed {
 		return
 	}
-	s.assertMutable("Set")
 
-	if s.state == sessionDeleted {
-		s.sessdata.CreatedAt = time.Now()
-		s.rotate = true
+	if err := s.snapshotData(); err != nil {
+		s.pendingSaveErr = err
+		return
 	}
-	s.state = sessionDirty
-	s.sessdata.Data = data
+	s.reviveForWrite()
 }
 
-// Delete marks the session for deletion at the end of the request.
+func (s *Session[T]) snapshotData() error {
+	payload, err := s.mgr.codec.MarshalPayload(s.working)
+	if err != nil {
+		return fmt.Errorf("encoding application data: %w", err)
+	}
+	s.payload = payload
+	s.dataScheduled = true
+	s.pendingSaveErr = nil
+	return nil
+}
+
+// reviveForWrite turns a deleted request session into a fresh active session.
+// Its working pointer and zero-value payload were installed by markDeleted.
+func (s *Session[T]) reviveForWrite() {
+	if !s.deleted {
+		return
+	}
+	s.meta.CreatedAt = time.Now()
+	s.rotate = true
+	s.deleted = false
+}
+
+// Delete schedules the session for deletion and replaces its application data
+// with a new zero value. Pointers returned by an earlier Get are detached.
 //
-// With a KV-backed manager, Delete removes the server-side session. With a
-// cookie-backed manager, it only instructs the current client to remove its
-// cookie; previously copied cookie values remain valid until expiration.
+// A KV-backed Manager deletes stored state. A cookie-backed Manager can only
+// expire the current client's cookie.
 func (s *Session[T]) Delete() {
 	s.ensureLoaded()
-	if s.aborted {
+	s.assertMutable("Delete")
+	if s.aborted || s.loadFailed {
 		return
 	}
-	s.assertMutable("Delete")
 
 	s.markDeleted()
 }
 
 func (s *Session[T]) markDeleted() {
-	s.loadedData = nil
-	s.sessdata = persistedSession[T]{}
+	s.meta = sessionMeta{}
+	s.working = new(T)
+	s.payload = append([]byte(nil), s.zeroPayload...)
 	s.isNew = true
-	s.state = sessionDeleted
+	s.deleted = true
 	s.rotate = false
+	s.dataScheduled = false
+	s.metaDirty = false
+	s.pendingSaveErr = nil
 }
 
-// Reset renews the session while retaining its data.
+// Reset rotates the session identifier and snapshots the current data. It also
+// restarts the session lifetime.
 //
-// Call Reset before storing an authenticated identity so a previously issued
-// session ID cannot be reused after login. Reset also restarts CreatedAt and
-// UpdatedAt so IdleTimeout and MaxLifetime begin at authentication. With a
-// KV-backed manager, Reset deletes the current server-side session and assigns
-// a new session ID, invalidating the previous ID. With a cookie-backed manager,
-// it only issues a newly encrypted cookie; previously copied cookie values
-// remain valid until expiration. Applications requiring revocation or session
-// ID rotation must use a KV-backed manager.
+// Use Reset when establishing an authenticated identity. A KV-backed Manager
+// invalidates the old identifier. A cookie-backed Manager cannot revoke copies
+// of an earlier cookie.
 func (s *Session[T]) Reset() {
 	s.ensureLoaded()
-	if s.aborted {
+	s.assertMutable("Reset")
+	if s.aborted || s.loadFailed {
 		return
 	}
-	s.assertMutable("Reset")
+	if err := s.snapshotData(); err != nil {
+		s.pendingSaveErr = err
+	}
 
-	s.loadedData = nil
 	now := time.Now()
-	s.sessdata.CreatedAt = now
-	s.sessdata.UpdatedAt = now
-	s.state = sessionDirty
+	s.meta.CreatedAt = now
+	s.meta.UpdatedAt = now
+	s.deleted = false
 	s.rotate = true
 	s.isNew = true
+	s.metaDirty = true
 }
 
-// TakeFlashes returns and removes all queued flash messages. It returns nil and
-// does not mutate the session when no flashes are queued.
+// TakeFlashes returns and removes all queued flashes. It returns nil without
+// scheduling a write when the queue is empty.
 func (s *Session[T]) TakeFlashes() []Flash {
 	s.ensureLoaded()
-	if s.aborted {
+	if s.aborted || s.loadFailed {
 		return nil
 	}
-	if len(s.sessdata.Flashes) == 0 {
+	if len(s.meta.Flashes) == 0 {
 		return nil
 	}
 	s.assertMutable("TakeFlashes")
-
-	flashes := append([]Flash(nil), s.sessdata.Flashes...)
-	s.sessdata.Flashes = nil
-	s.state = sessionDirty
+	flashes := append([]Flash(nil), s.meta.Flashes...)
+	s.meta.Flashes = nil
+	s.metaDirty = true
 	return flashes
 }
 
-// AddFlash appends a flash message and marks the session for saving.
+// AddFlash queues a flash and schedules session metadata for persistence.
 func (s *Session[T]) AddFlash(flash Flash) {
 	s.ensureLoaded()
-	if s.aborted {
+	s.assertMutable("AddFlash")
+	if s.aborted || s.loadFailed {
 		return
 	}
-	s.assertMutable("AddFlash")
 
-	if s.state == sessionDeleted {
-		s.sessdata.CreatedAt = time.Now()
-		s.rotate = true
-	}
-	s.sessdata.Flashes = append(s.sessdata.Flashes, flash)
-	s.state = sessionDirty
+	s.reviveForWrite()
+	s.meta.Flashes = append(s.meta.Flashes, flash)
+	s.metaDirty = true
 }
 
-// IsDeviceBound returns true if the session is cryptographically bound to a device.
+// IsDeviceBound reports whether the session is bound to a device.
 func (s *Session[T]) IsDeviceBound() bool {
 	s.ensureLoaded()
-	if s.aborted {
+	if s.aborted || s.loadFailed {
 		return false
 	}
 
-	return len(s.sessdata.DBSCPublicJWK) > 0
+	return len(s.meta.DBSCPublicJWK) > 0
 }
 
-// InitiateDBSCRegistration adds Secure-Session-Registration immediately.
-// When DBSC is enabled, the manager normally attaches this header automatically
-// on a first-party response that persists session data (Set, Reset, flashes),
-// as long as the session is not yet device-bound. Cross-site requests are
-// skipped. Call this to offer without saving application data or to replace a
-// pending challenge. It is a no-op when already bound or when this request
-// would not auto-offer.
+// InitiateDBSCRegistration adds a Secure-Session-Registration header without
+// saving application data. It does nothing for a bound session or a request
+// that is not eligible for registration.
 //
-// Requires DBSCRefreshInterval and DBSCRegistrationPath on the session Manager.
+// The Manager must configure DBSCRefreshInterval and DBSCRegistrationPath.
 func (s *Session[T]) InitiateDBSCRegistration(w http.ResponseWriter, r *http.Request) {
 	s.ensureLoaded()
+	s.assertMutable("InitiateDBSCRegistration")
 	if s.aborted {
 		return
 	}
-	if len(s.sessdata.DBSCPublicJWK) > 0 {
+	if len(s.meta.DBSCPublicJWK) > 0 {
 		slog.DebugContext(r.Context(), "dbsc InitiateDBSCRegistration skipped", "reason", "already_device_bound")
 		return
 	}
-	s.assertMutable("InitiateDBSCRegistration")
 	if !dbscShouldOfferRegistration(r) {
 		slog.DebugContext(r.Context(), "dbsc InitiateDBSCRegistration skipped", "reason", "not_first_party",
 			dbscFetchMetadata(r))
