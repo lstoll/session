@@ -166,7 +166,7 @@ func dbscJOSEProofJWT(t *testing.T, algorithm jose.SignatureAlgorithm, private a
 }
 
 func TestDBSCRecentRefreshChallenges(t *testing.T) {
-	sctx := &Session[testSessionData]{sessdata: persistedSession[testSessionData]{DBSCSessionID: "dbsc-session"}}
+	sctx := &Session[testSessionData]{meta: sessionMeta{DBSCSessionID: "dbsc-session"}}
 	now := time.Now()
 
 	first, err := issueDBSCRefreshChallenge(sctx, now)
@@ -347,7 +347,7 @@ func TestDBSCOptionsValidation(t *testing.T) {
 }
 
 func TestDBSCRecentRefreshChallengesAreBoundedAndExpire(t *testing.T) {
-	sctx := &Session[testSessionData]{sessdata: persistedSession[testSessionData]{DBSCSessionID: "dbsc-session"}}
+	sctx := &Session[testSessionData]{meta: sessionMeta{DBSCSessionID: "dbsc-session"}}
 	now := time.Now()
 	var oldest string
 	for i := 0; i < dbscMaxRecentChallenges+1; i++ {
@@ -359,14 +359,14 @@ func TestDBSCRecentRefreshChallengesAreBoundedAndExpire(t *testing.T) {
 			oldest = challenge
 		}
 	}
-	if got := len(sctx.sessdata.DBSCChallenges); got != dbscMaxRecentChallenges {
+	if got := len(sctx.meta.DBSCChallenges); got != dbscMaxRecentChallenges {
 		t.Fatalf("stored challenges = %d, want %d", got, dbscMaxRecentChallenges)
 	}
 	if err := verifyDBSCRefreshChallenge(sctx, oldest, now); err == nil {
 		t.Fatal("oldest challenge remained valid after bounded eviction")
 	}
 
-	latest := &sctx.sessdata.DBSCChallenges[len(sctx.sessdata.DBSCChallenges)-1]
+	latest := &sctx.meta.DBSCChallenges[len(sctx.meta.DBSCChallenges)-1]
 	latest.ExpiresAt = now.Add(-time.Second)
 	if err := verifyDBSCRefreshChallenge(sctx, latest.Value, now); err == nil {
 		t.Fatal("expired challenge remained valid")
@@ -465,7 +465,7 @@ func TestDBSCExpiredRegistrationChallengeIsReoffered(t *testing.T) {
 		DBSCRefreshInterval:  time.Minute,
 		DBSCRegistrationPath: "/register",
 	}}
-	sctx := &Session[testSessionData]{sessdata: persistedSession[testSessionData]{
+	sctx := &Session[testSessionData]{meta: sessionMeta{
 		DBSCRegistrationChallenge: dbscChallenge{
 			Value:     "expired",
 			ExpiresAt: time.Now().Add(-time.Minute),
@@ -481,10 +481,10 @@ func TestDBSCExpiredRegistrationChallengeIsReoffered(t *testing.T) {
 		t.Fatal("expired registration challenge suppressed a new offer")
 	}
 	challenge := challengeFromSecureSessionRegistration(t, header)
-	if challenge == "expired" || challenge != sctx.sessdata.DBSCRegistrationChallenge.Value {
-		t.Fatalf("replacement challenge = %q, stored = %q", challenge, sctx.sessdata.DBSCRegistrationChallenge.Value)
+	if challenge == "expired" || challenge != sctx.meta.DBSCRegistrationChallenge.Value {
+		t.Fatalf("replacement challenge = %q, stored = %q", challenge, sctx.meta.DBSCRegistrationChallenge.Value)
 	}
-	if !sctx.sessdata.DBSCRegistrationChallenge.ExpiresAt.After(time.Now()) {
+	if !sctx.meta.DBSCRegistrationChallenge.ExpiresAt.After(time.Now()) {
 		t.Fatal("replacement registration challenge is not fresh")
 	}
 }
@@ -613,9 +613,8 @@ func testDBSCRegistrationOfferOnReset(t *testing.T) {
 	resetHandler := mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sess := mgr.FromContext(r.Context())
 		sess.Reset()
-		data := sess.Get()
-		data.Bootstrap = "1"
-		sess.Set(data)
+		sess.Get().Bootstrap = "1"
+		sess.Save()
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -626,7 +625,7 @@ func testDBSCRegistrationOfferOnReset(t *testing.T) {
 		t.Fatalf("reset login: %v", rr.Code)
 	}
 	if rr.Header().Get("Secure-Session-Registration") == "" {
-		t.Fatal("Reset then Set did not offer registration")
+		t.Fatal("Reset then Save did not offer registration")
 	}
 }
 
@@ -876,9 +875,8 @@ func setupDBSCHandler(t *testing.T, kv KV, refreshInterval time.Duration) (*Mana
 		sess := mgr.FromContext(r.Context())
 		switch r.URL.Path {
 		case "/start":
-			data := sess.Get()
-			data.Bootstrap = "1"
-			sess.Set(data)
+			sess.Get().Bootstrap = "1"
+			sess.Save()
 			w.WriteHeader(http.StatusOK)
 		default:
 			if sess.Get().Bootstrap == "" {

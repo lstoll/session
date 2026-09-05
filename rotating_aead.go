@@ -8,7 +8,7 @@ import (
 )
 
 // rotatingAESGCM implements cipher.AEAD with key rotation. Seal always uses
-// the current key; Open accepts ciphertext made with the current key or any
+// the current key. Open accepts ciphertext made with the current key or any
 // configured previous key.
 type rotatingAESGCM struct {
 	keys []cipher.AEAD
@@ -17,8 +17,8 @@ type rotatingAESGCM struct {
 var _ cipher.AEAD = (*rotatingAESGCM)(nil)
 
 // NewRotatingAESGCM creates a rotation-aware AES-GCM cipher. Each key must be
-// 16, 24, or 32 bytes. Prefer 32 random bytes for AES-256-GCM. Seal uses
-// currentKey; Open also tries previousKeys in order. The keys are copied.
+// 16, 24, or 32 bytes. Prefer 32 random bytes for AES-256-GCM. Seal uses the
+// current key. Open tries previous keys in order. The keys are copied.
 func NewRotatingAESGCM(currentKey []byte, previousKeys ...[]byte) (cipher.AEAD, error) {
 	allKeys := append([][]byte{currentKey}, previousKeys...)
 	aeads := make([]cipher.AEAD, 0, len(allKeys))

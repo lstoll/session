@@ -69,11 +69,35 @@ func TestManagerContext_testSessionFallback(t *testing.T) {
 		Data: testSessionData{Number: 1},
 	})
 	sess := mgr.FromContext(ctx)
-	if sess.Get().Number != 1 {
-		t.Fatalf("got %v", sess.Get().Number)
+	if got := sess.Get().Number; got != 1 {
+		t.Fatalf("got %v", got)
 	}
-	sess.Set(testSessionData{Number: 2})
+	*sess.Get() = testSessionData{Number: 2}
+	sess.Save()
 	if snapshot := state.Snapshot(); !snapshot.Saved || snapshot.Data.Number != 2 {
 		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+func TestManagerWrapPassesThroughTestSession(t *testing.T) {
+	mgr, err := NewKVManager[testSessionData](NewMemoryKV(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx, state := testsession.WithContext(req.Context(), mgr, testsession.Initial[testSessionData]{
+		Data: testSessionData{User: "fixture"},
+	})
+	req = req.WithContext(ctx)
+	var got string
+	mgr.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = mgr.FromContext(r.Context()).Get().User
+		w.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(httptest.NewRecorder(), req)
+	if got != "fixture" {
+		t.Fatalf("wrapped fixture data = %q", got)
+	}
+	if state.Snapshot().Saved {
+		t.Fatal("pass-through should not persist fixture")
 	}
 }

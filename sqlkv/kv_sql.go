@@ -13,7 +13,7 @@ import (
 var tableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 const (
-	// DefaultTableName is the default table name for the KV store
+	// DefaultTableName is the default session table name.
 	DefaultTableName = "web_sessions"
 )
 
@@ -33,21 +33,21 @@ const (
 	sqliteUpsert   = `ON CONFLICT(id) DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at`
 )
 
-// Dialect represents a specific SQL dialect configuration
+// Dialect identifies a supported SQL dialect.
 type Dialect int
 
 const (
-	// Generic is the default dialect (uses standard SQL as much as possible)
+	// Generic uses broadly supported SQL syntax.
 	Generic Dialect = iota
-	// MySQL dialect
+	// MySQL selects MySQL syntax.
 	MySQL
-	// PostgreSQL dialect
+	// PostgreSQL selects PostgreSQL syntax.
 	PostgreSQL
-	// SQLite dialect
+	// SQLite selects SQLite syntax.
 	SQLite
 )
 
-// SqlKV implements the session.SqlKV interface using database/sql
+// SqlKV is a session KV store backed by database/sql.
 type SqlKV struct {
 	db *sql.DB
 
@@ -60,15 +60,16 @@ type SqlKV struct {
 	tableName string
 }
 
-// Opts contains options for configuring the KV store
+// Opts configures a SqlKV.
 type Opts struct {
-	// TableName is the name of the table to use for the KV store (defaults to "web_sessions")
+	// TableName defaults to DefaultTableName.
 	TableName string
-	// Dialect specifies which SQL dialect to use (defaults to Generic)
+	// Dialect defaults to Generic.
 	Dialect Dialect
 }
 
-// New creates a new KV store backed by database/sql
+// New creates a SQL-backed KV store. It does not create or alter database
+// schema. Call CreateTable or manage the schema separately.
 func New(db *sql.DB, opts *Opts) (*SqlKV, error) {
 	if db == nil {
 		return nil, errors.New("database is required")
@@ -160,7 +161,7 @@ func convertPlaceholders(query string) string {
 	return result
 }
 
-// Get retrieves a value by key, checking expiration
+// Get retrieves an unexpired value.
 func (k *SqlKV) Get(ctx context.Context, key string) (_ []byte, found bool, _ error) {
 	var data []byte
 	err := k.db.QueryRowContext(ctx, k.getQuery, key).Scan(&data)
@@ -175,7 +176,7 @@ func (k *SqlKV) Get(ctx context.Context, key string) (_ []byte, found bool, _ er
 	return data, true, nil
 }
 
-// Set stores a key with a given value and expiration time, creating or updating as needed
+// Set creates or replaces a value and its expiration time.
 func (k *SqlKV) Set(ctx context.Context, key string, expiresAt time.Time, value []byte) error {
 	var err error
 
@@ -194,7 +195,7 @@ func (k *SqlKV) Set(ctx context.Context, key string, expiresAt time.Time, value 
 	return nil
 }
 
-// Delete removes a key from the store
+// Delete removes a value.
 func (k *SqlKV) Delete(ctx context.Context, key string) error {
 	_, err := k.db.ExecContext(ctx, k.deleteQuery, key)
 	if err != nil {
@@ -203,7 +204,7 @@ func (k *SqlKV) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// GC performs garbage collection, removing expired keys
+// GC removes expired values.
 func (k *SqlKV) GC(ctx context.Context) (deleted int, _ error) {
 	result, err := k.db.ExecContext(ctx, k.gcQuery)
 	if err != nil {
@@ -218,7 +219,7 @@ func (k *SqlKV) GC(ctx context.Context) (deleted int, _ error) {
 	return int(rowsAffected), nil
 }
 
-// RunGC starts a background goroutine that performs garbage collection at regular intervals
+// RunGC removes expired values at each interval until ctx is canceled.
 func (k *SqlKV) RunGC(ctx context.Context, interval time.Duration, logger *slog.Logger) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -245,7 +246,8 @@ func (k *SqlKV) RunGC(ctx context.Context, interval time.Duration, logger *slog.
 	}()
 }
 
-// CreateTable creates the sessions table if it doesn't exist
+// CreateTable creates the session table and expiration index if absent. It does
+// not modify an existing schema.
 func (k *SqlKV) CreateTable(ctx context.Context) error {
 	var (
 		query      string

@@ -14,12 +14,12 @@ type touchRecordingStore[T any] struct {
 }
 
 //nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
-func (*touchRecordingStore[T]) load(*http.Request) (persistedSession[T], []byte, error) {
-	return persistedSession[T]{}, nil, nil
+func (*touchRecordingStore[T]) load(*http.Request) ([]byte, bool, error) {
+	return nil, false, nil
 }
 
 //nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
-func (*touchRecordingStore[T]) save(http.ResponseWriter, *http.Request, time.Time, persistedSession[T]) error {
+func (*touchRecordingStore[T]) save(http.ResponseWriter, *http.Request, time.Time, []byte) error {
 	return nil
 }
 
@@ -38,53 +38,53 @@ func TestItem_InvalidAt(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		item        persistedSession[struct{}]
+		item        sessionMeta
 		maxLifetime *time.Duration
 		idleTimeout *time.Duration
 		want        time.Time
 	}{
 		{
 			name:        "Max lifetime only",
-			item:        persistedSession[struct{}]{CreatedAt: now},
+			item:        sessionMeta{CreatedAt: now},
 			maxLifetime: ptr(2 * time.Hour),
 			want:        now.Add(2 * time.Hour),
 		},
 		{
 			name:        "Idle timeout only (CreatedAt)",
-			item:        persistedSession[struct{}]{CreatedAt: now},
+			item:        sessionMeta{CreatedAt: now},
 			idleTimeout: ptr(1 * time.Hour),
 			want:        now.Add(1 * time.Hour),
 		},
 		{
 			name:        "Idle timeout only (UpdatedAt)",
-			item:        persistedSession[struct{}]{CreatedAt: now, UpdatedAt: now.Add(30 * time.Minute)},
+			item:        sessionMeta{CreatedAt: now, UpdatedAt: now.Add(30 * time.Minute)},
 			idleTimeout: ptr(1 * time.Hour),
 			want:        now.Add(30 * time.Minute).Add(1 * time.Hour),
 		},
 		{
 			name:        "Both timeouts, MaxLifetime earlier",
-			item:        persistedSession[struct{}]{CreatedAt: now, UpdatedAt: now.Add(30 * time.Minute)},
+			item:        sessionMeta{CreatedAt: now, UpdatedAt: now.Add(30 * time.Minute)},
 			maxLifetime: ptr(1 * time.Hour),
 			idleTimeout: ptr(2 * time.Hour),
 			want:        now.Add(1 * time.Hour),
 		},
 		{
 			name:        "Both timeouts, IdleTimeout earlier (CreatedAt)",
-			item:        persistedSession[struct{}]{CreatedAt: now},
+			item:        sessionMeta{CreatedAt: now},
 			maxLifetime: ptr(2 * time.Hour),
 			idleTimeout: ptr(1 * time.Hour),
 			want:        now.Add(1 * time.Hour),
 		},
 		{
 			name:        "Both timeouts, IdleTimeout earlier (UpdatedAt)",
-			item:        persistedSession[struct{}]{CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
+			item:        sessionMeta{CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
 			maxLifetime: ptr(2 * time.Hour),
 			idleTimeout: ptr(1 * time.Hour),
 			want:        now.Add(1 * time.Hour).Add(1 * time.Hour), // 2 hours from original CreatedAt
 		},
 		{
 			name:        "UpdatedAt is nil, Idle Timeout",
-			item:        persistedSession[struct{}]{CreatedAt: now},
+			item:        sessionMeta{CreatedAt: now},
 			idleTimeout: ptr(1 * time.Hour),
 			want:        now.Add(1 * time.Hour),
 		},
@@ -108,9 +108,32 @@ func TestItem_InvalidAt(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsPointerAndInterfaceDataTypes(t *testing.T) {
+	if _, err := NewKVManager[*testSessionData](NewMemoryKV(), nil); err == nil {
+		t.Fatal("pointer session data type accepted")
+	}
+	if _, err := NewKVManager[any](NewMemoryKV(), nil); err == nil {
+		t.Fatal("interface session data type accepted")
+	}
+	if _, err := NewKVManager[string](NewMemoryKV(), nil); err != nil {
+		t.Fatalf("string session data type rejected: %v", err)
+	}
+	mapManager, err := NewKVManager[map[string]string](NewMemoryKV(), nil)
+	if err != nil {
+		t.Fatalf("map session data type rejected: %v", err)
+	}
+	var got *map[string]string
+	mapManager.Wrap(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		got = mapManager.FromContext(r.Context()).Get()
+	})).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	if got == nil || *got != nil {
+		t.Fatalf("zero map data = %#v; want non-nil pointer to nil map", got)
+	}
+}
+
 func TestTouchSessionAdvancesIdleExpiryAndPersistsUpdatedAt(t *testing.T) {
 	const idleTimeout = time.Hour
-	codec := &gobCodec[string]{}
+	codec := &gobCodec{}
 	store := &touchRecordingStore[string]{}
 	mgr := &Manager[string]{
 		store: store,
@@ -118,21 +141,21 @@ func TestTouchSessionAdvancesIdleExpiryAndPersistsUpdatedAt(t *testing.T) {
 		opts:  managerOpts[string]{IdleTimeout: idleTimeout},
 	}
 
-	original := persistedSession[string]{
-		Data:      "stored",
+	originalData := "stored"
+	originalMeta := sessionMeta{
 		CreatedAt: time.Now().Add(-2 * time.Hour),
 		UpdatedAt: time.Now().Add(-30 * time.Minute),
 	}
-	loadedData, err := codec.Encode(original)
+	payload, err := codec.MarshalPayload(&originalData)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sctx := &Session[string]{
-		sessdata:   original,
-		loadedData: loadedData,
+		meta:    originalMeta,
+		payload: payload,
+		working: ptr("transformed"),
 	}
 	// Simulate an Onload transformation. A clean-session touch must not persist it.
-	sctx.sessdata.Data = "transformed"
 
 	before := time.Now()
 	if err := mgr.touchSession(
@@ -144,25 +167,29 @@ func TestTouchSessionAdvancesIdleExpiryAndPersistsUpdatedAt(t *testing.T) {
 	}
 	after := time.Now()
 
-	persisted, err := codec.Decode(store.data)
+	meta, payload, err := codec.Decode(store.data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.Data != original.Data {
-		t.Fatalf("persisted data = %q, want original %q", persisted.Data, original.Data)
+	var persistedData string
+	if err := codec.UnmarshalPayload(payload, &persistedData); err != nil {
+		t.Fatal(err)
 	}
-	if persisted.UpdatedAt.Before(before) || persisted.UpdatedAt.After(after) {
-		t.Fatalf("persisted UpdatedAt = %v, want between %v and %v", persisted.UpdatedAt, before, after)
+	if persistedData != originalData {
+		t.Fatalf("persisted data = %q, want original %q", persistedData, originalData)
 	}
-	if !sctx.sessdata.UpdatedAt.Equal(persisted.UpdatedAt) {
-		t.Fatalf("in-memory UpdatedAt = %v, persisted %v", sctx.sessdata.UpdatedAt, persisted.UpdatedAt)
+	if meta.UpdatedAt.Before(before) || meta.UpdatedAt.After(after) {
+		t.Fatalf("persisted UpdatedAt = %v, want between %v and %v", meta.UpdatedAt, before, after)
 	}
-	wantExpiry := persisted.UpdatedAt.Add(idleTimeout)
+	if !sctx.meta.UpdatedAt.Equal(meta.UpdatedAt) {
+		t.Fatalf("in-memory UpdatedAt = %v, persisted %v", sctx.meta.UpdatedAt, meta.UpdatedAt)
+	}
+	wantExpiry := meta.UpdatedAt.Add(idleTimeout)
 	if !store.expiresAt.Equal(wantExpiry) {
 		t.Fatalf("expiry = %v, want %v", store.expiresAt, wantExpiry)
 	}
-	if !store.expiresAt.After(original.UpdatedAt.Add(idleTimeout)) {
-		t.Fatalf("expiry did not advance: got %v, original %v", store.expiresAt, original.UpdatedAt.Add(idleTimeout))
+	if !store.expiresAt.After(originalMeta.UpdatedAt.Add(idleTimeout)) {
+		t.Fatalf("expiry did not advance: got %v, original %v", store.expiresAt, originalMeta.UpdatedAt.Add(idleTimeout))
 	}
 }
 

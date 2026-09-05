@@ -53,14 +53,13 @@ func runE2ETest(t testing.TB, mgr *Manager[testSessionData], testReset bool) {
 
 		t.Logf("Setting session value=%s", value)
 		sess := mgr.FromContext(r.Context())
-		data := sess.Get()
-		data.Value = value
-		sess.Set(data)
+		sess.Get().Value = value
+		sess.Save()
 	})
 
 	mux.HandleFunc("GET /get", func(w http.ResponseWriter, r *http.Request) {
 		sess := mgr.FromContext(r.Context())
-		t.Logf("Session data in context: %+v", sess.sessdata.Data)
+		t.Logf("Session data in context: %+v", *sess.Get())
 
 		value := sess.Get().Value
 		if value == "" {

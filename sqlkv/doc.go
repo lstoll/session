@@ -1,10 +1,8 @@
-// Package sqlkv provides a SQL-backed session store using database/sql
+// Package sqlkv provides a session store backed by database/sql.
 //
-// This implementation is designed to work across multiple SQL database engines
-// with appropriate dialect settings. Supported dialects include Generic (default),
-// MySQL, PostgreSQL, SQLite, and SQL Server.
+// It supports Generic, MySQL, PostgreSQL, and SQLite dialects.
 //
-// Example Schema:
+// Example schema:
 //
 //	CREATE TABLE web_sessions (
 //		id TEXT PRIMARY KEY,
@@ -43,9 +41,7 @@
 //		log.Fatal(err)
 //	}
 //
-// Garbage Collection:
-//
-// The KV store supports garbage collection to remove expired sessions:
+// Garbage collection:
 //
 //	// Run garbage collection once
 //	deleted, err := kv.GC(context.Background())
@@ -58,5 +54,4 @@
 //	ctx, cancel := context.WithCancel(context.Background())
 //	defer cancel()
 //	kv.RunGC(ctx, 10*time.Minute, log.New(os.Stdout, "GC: ", log.LstdFlags))
-
 package sqlkv

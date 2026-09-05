@@ -13,9 +13,8 @@ import (
 )
 
 // KV stores encoded server-side sessions. Implementations must be safe for
-// concurrent use, must not retain the value passed to Set, and must return a
-// caller-owned value from Get. Entries at or past expiresAt must be reported as
-// not found.
+// concurrent use. Set must not retain value, and Get must return an independent
+// byte slice. Expired entries must be reported as not found.
 type KV interface {
 	Get(_ context.Context, key string) (_ []byte, found bool, _ error)
 	Set(_ context.Context, key string, expiresAt time.Time, value []byte) error
@@ -25,7 +24,6 @@ type KV interface {
 type kvStore[T any] struct {
 	m              *Manager[T]
 	kv             KV
-	codec          codec[T]
 	cookieSettings SessionCookieOpts
 	authenticator  Authenticator
 }
@@ -36,7 +34,7 @@ func (s *kvStore[T]) sessionIDAuthenticatorInput(id string) []byte {
 	return []byte(s.cookieSettings.Name + "\x00" + id)
 }
 
-//nolint:unused // Used by generic store methods; golangci-lint does not resolve the instantiation.
+//nolint:unused // Used by generic store methods. golangci-lint does not resolve the instantiation.
 func (s *kvStore[T]) authenticateSessionID(id string) (string, error) {
 	if s.authenticator == nil {
 		return id, nil
@@ -70,7 +68,7 @@ func (s *kvStore[T]) parseSessionIDCookie(raw string) (id string, ok bool) {
 }
 
 // plausibleSessionID bounds attacker-controlled KV lookup input. It does not
-// authenticate the ID; only a successful store lookup makes an ID reusable.
+// authenticate the ID. Only a successful store lookup makes an ID reusable.
 func plausibleSessionID(id string) bool {
 	return id != "" && len(id) <= 128
 }
@@ -88,19 +86,19 @@ func (s *kvStore[T]) peekSessionID(r *http.Request) bool {
 	return true
 }
 
-//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
-func (s *kvStore[T]) load(r *http.Request) (persistedSession[T], []byte, error) {
+//nolint:unused // Implements sessionStore. golangci-lint does not resolve the generic interface implementation.
+func (s *kvStore[T]) load(r *http.Request) ([]byte, bool, error) {
 	cookie, err := r.Cookie(s.cookieSettings.Name)
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
-			return persistedSession[T]{}, nil, nil
+			return nil, false, nil
 		}
-		return persistedSession[T]{}, nil, fmt.Errorf("getting cookie %s: %w", s.cookieSettings.Name, err)
+		return nil, false, fmt.Errorf("getting cookie %s: %w", s.cookieSettings.Name, err)
 	}
 
 	sessionID, ok := s.parseSessionIDCookie(cookie.Value)
 	if !ok {
-		return persistedSession[T]{}, nil, nil
+		return nil, false, nil
 	}
 	// A client-provided ID is only reusable after the store confirms that it was
 	// issued by this server. Until then, a subsequent save must generate a new ID.
@@ -112,25 +110,19 @@ func (s *kvStore[T]) load(r *http.Request) (persistedSession[T], []byte, error) 
 	// Get data from KV
 	data, found, err := s.kv.Get(r.Context(), storeKey)
 	if err != nil {
-		return persistedSession[T]{}, nil, fmt.Errorf("getting from KV: %w", err)
+		return nil, false, fmt.Errorf("getting from KV: %w", err)
 	}
 
 	if !found {
-		return persistedSession[T]{}, nil, nil
+		return nil, false, nil
 	}
 
-	// Decode using the codec
-	sess, err := s.codec.Decode(data)
-	if err != nil {
-		return persistedSession[T]{}, nil, fmt.Errorf("decoding session: %w", err)
-	}
 	setManagerSessionIDInContext(r, s.m, sessionID)
-
-	return sess, data, nil
+	return data, true, nil
 }
 
-//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
-func (s *kvStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, sess persistedSession[T]) error {
+//nolint:unused // Implements sessionStore. golangci-lint does not resolve the generic interface implementation.
+func (s *kvStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
 	// Generate or get session ID
 	sessionID := getManagerSessionIDFromContext(r, s.m)
 	if sessionID == "" {
@@ -141,12 +133,6 @@ func (s *kvStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt time
 	// Hash the session ID for storage
 	storeKey := managerHashSessionID(sessionID)
 
-	// Encode using the codec
-	data, err := s.codec.Encode(sess)
-	if err != nil {
-		return fmt.Errorf("encoding session: %w", err)
-	}
-
 	// Store in KV
 	if err := s.kv.Set(r.Context(), storeKey, expiresAt, data); err != nil {
 		return fmt.Errorf("storing in KV: %w", err)
@@ -155,7 +141,7 @@ func (s *kvStore[T]) save(w http.ResponseWriter, r *http.Request, expiresAt time
 	return s.writeSessionCookie(w, expiresAt, sessionID)
 }
 
-//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
+//nolint:unused // Implements sessionStore. golangci-lint does not resolve the generic interface implementation.
 func (s *kvStore[T]) delete(r *http.Request) error {
 	sessionID := getManagerSessionIDFromContext(r, s.m)
 	if sessionID == "" {
@@ -181,7 +167,7 @@ func (s *kvStore[T]) delete(r *http.Request) error {
 	return nil
 }
 
-//nolint:unused // Implements sessionStore; golangci-lint does not resolve the generic interface implementation.
+//nolint:unused // Implements sessionStore. golangci-lint does not resolve the generic interface implementation.
 func (s *kvStore[T]) touch(w http.ResponseWriter, r *http.Request, expiresAt time.Time, data []byte) error {
 	// Get session ID
 	sessionID := getManagerSessionIDFromContext(r, s.m)
@@ -206,7 +192,7 @@ func (s *kvStore[T]) touch(w http.ResponseWriter, r *http.Request, expiresAt tim
 	return s.writeSessionCookie(w, expiresAt, sessionID)
 }
 
-//nolint:unused // Used by generic store methods; golangci-lint does not resolve the instantiation.
+//nolint:unused // Used by generic store methods. golangci-lint does not resolve the instantiation.
 func (s *kvStore[T]) writeSessionCookie(w http.ResponseWriter, expiresAt time.Time, sessionID string) error {
 	cookieValue, err := s.authenticateSessionID(sessionID)
 	if err != nil {

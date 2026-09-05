@@ -9,8 +9,8 @@ import (
 
 func TestCodecRoundTrip(t *testing.T) {
 	now := time.Date(2026, time.August, 14, 12, 30, 0, 0, time.UTC)
-	want := persistedSession[testSessionData]{
-		Data:      testSessionData{User: "alice", Value: "value0"},
+	wantData := testSessionData{User: "alice", Value: "value0"}
+	wantMeta := sessionMeta{
 		CreatedAt: now,
 		UpdatedAt: now.Add(time.Minute),
 		Flashes: []Flash{
@@ -36,23 +36,31 @@ func TestCodecRoundTrip(t *testing.T) {
 		{name: "gob", selector: GobCodec{}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			codec, err := resolveCodec[testSessionData](tt.selector)
+			codec, err := resolveCodec(tt.selector)
 			if err != nil {
 				t.Fatal(err)
 			}
-			encoded, err := codec.Encode(want)
+			payload, err := codec.MarshalPayload(&wantData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := codec.Encode(wantMeta, payload)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if tt.isJSON && !json.Valid(encoded) {
 				t.Fatalf("JSON codec produced invalid JSON: %q", encoded)
 			}
-			got, err := codec.Decode(encoded)
+			gotMeta, gotPayload, err := codec.Decode(encoded)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("round trip mismatch:\n got: %#v\nwant: %#v", got, want)
+			var gotData testSessionData
+			if err := codec.UnmarshalPayload(gotPayload, &gotData); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotMeta, wantMeta) || !reflect.DeepEqual(gotData, wantData) {
+				t.Fatalf("round trip mismatch:\n got: %#v %#v\nwant: %#v %#v", gotMeta, gotData, wantMeta, wantData)
 			}
 		})
 	}
@@ -63,7 +71,7 @@ func TestManagerCodecSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := defaultManager.codec.(*jsonCodec[testSessionData]); !ok {
+	if _, ok := defaultManager.codec.(*jsonCodec); !ok {
 		t.Fatalf("default codec = %T, want JSON", defaultManager.codec)
 	}
 
@@ -73,7 +81,27 @@ func TestManagerCodecSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := gobManager.codec.(*gobCodec[testSessionData]); !ok {
+	if _, ok := gobManager.codec.(*gobCodec); !ok {
 		t.Fatalf("selected codec = %T, want gob", gobManager.codec)
+	}
+}
+
+func TestJSONCodecCarriesPayload(t *testing.T) {
+	c := &jsonCodec{}
+	payload := []byte(`{ "User": "alice" }`)
+	encoded, err := c.Encode(sessionMeta{CreatedAt: time.Now()}, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, gotPayload, err := c.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got testSessionData
+	if err := c.UnmarshalPayload(gotPayload, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.User != "alice" {
+		t.Fatalf("decoded payload = %#v", got)
 	}
 }

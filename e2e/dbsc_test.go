@@ -93,9 +93,8 @@ func startDBSCTestServer(t *testing.T) (string, string) {
 
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
 		sess := mgr.FromContext(r.Context())
-		data := sess.Get()
-		data.User = "alice"
-		sess.Set(data)
+		sess.Get().User = "alice"
+		sess.Save()
 		_, _ = w.Write([]byte("logged in"))
 	})
 
@@ -353,9 +352,8 @@ func TestLoginResponseIncludesSecureSessionRegistration(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
 		sess := mgr.FromContext(r.Context())
-		data := sess.Get()
-		data.User = "alice"
-		sess.Set(data)
+		sess.Get().User = "alice"
+		sess.Save()
 		w.Write([]byte("ok"))
 	})
 	ts := httptest.NewTLSServer(mgr.Wrap(mux))

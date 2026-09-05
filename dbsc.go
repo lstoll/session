@@ -24,29 +24,30 @@ type dbscChallenge struct {
 
 func registeredDBSCKey[T any](sctx *Session[T]) dbscproof.RegisteredKey {
 	return dbscproof.RegisteredKey{
-		Algorithm: sctx.sessdata.DBSCAlgorithm,
-		JWK:       sctx.sessdata.DBSCPublicJWK,
+		Algorithm: sctx.meta.DBSCAlgorithm,
+		JWK:       sctx.meta.DBSCPublicJWK,
 	}
 }
 
 func issueDBSCRegistrationChallenge[T any](sctx *Session[T], now time.Time) string {
+	sctx.reviveForWrite()
 	challenge := rand.Text()
-	sctx.sessdata.DBSCRegistrationChallenge = dbscChallenge{
+	sctx.meta.DBSCRegistrationChallenge = dbscChallenge{
 		Value:     challenge,
 		ExpiresAt: now.Add(dbscChallengeTTL),
 	}
-	sctx.state = sessionDirty
+	sctx.metaDirty = true
 	return challenge
 }
 
 func issueDBSCRefreshChallenge[T any](sctx *Session[T], now time.Time) (string, error) {
-	if sctx.sessdata.DBSCSessionID == "" {
+	if sctx.meta.DBSCSessionID == "" {
 		return "", errors.New("cannot issue refresh challenge without DBSC session ID")
 	}
 
 	challenge := rand.Text()
-	recent := sctx.sessdata.DBSCChallenges[:0]
-	for _, existing := range sctx.sessdata.DBSCChallenges {
+	recent := sctx.meta.DBSCChallenges[:0]
+	for _, existing := range sctx.meta.DBSCChallenges {
 		if existing.ExpiresAt.After(now) {
 			recent = append(recent, existing)
 		}
@@ -54,16 +55,16 @@ func issueDBSCRefreshChallenge[T any](sctx *Session[T], now time.Time) (string, 
 	if len(recent) >= dbscMaxRecentChallenges {
 		recent = recent[len(recent)-dbscMaxRecentChallenges+1:]
 	}
-	sctx.sessdata.DBSCChallenges = append(recent, dbscChallenge{
+	sctx.meta.DBSCChallenges = append(recent, dbscChallenge{
 		Value:     challenge,
 		ExpiresAt: now.Add(dbscChallengeTTL),
 	})
-	sctx.state = sessionDirty
+	sctx.metaDirty = true
 	return challenge, nil
 }
 
 func verifyDBSCRegistrationChallenge[T any](sctx *Session[T], challenge string, now time.Time) error {
-	pending := sctx.sessdata.DBSCRegistrationChallenge
+	pending := sctx.meta.DBSCRegistrationChallenge
 	if challenge == "" || pending.Value != challenge || !pending.ExpiresAt.After(now) {
 		return errors.New("registration challenge mismatch, missing, or expired")
 	}
@@ -71,7 +72,7 @@ func verifyDBSCRegistrationChallenge[T any](sctx *Session[T], challenge string, 
 }
 
 func verifyDBSCRefreshChallenge[T any](sctx *Session[T], challenge string, now time.Time) error {
-	for _, recent := range sctx.sessdata.DBSCChallenges {
+	for _, recent := range sctx.meta.DBSCChallenges {
 		if recent.Value == challenge && recent.ExpiresAt.After(now) {
 			return nil
 		}
@@ -80,20 +81,20 @@ func verifyDBSCRefreshChallenge[T any](sctx *Session[T], challenge string, now t
 }
 
 func consumeDBSCRefreshChallenge[T any](sctx *Session[T], challenge string, now time.Time) {
-	recent := sctx.sessdata.DBSCChallenges[:0]
-	for _, existing := range sctx.sessdata.DBSCChallenges {
+	recent := sctx.meta.DBSCChallenges[:0]
+	for _, existing := range sctx.meta.DBSCChallenges {
 		if existing.Value != challenge && existing.ExpiresAt.After(now) {
 			recent = append(recent, existing)
 		}
 	}
-	if len(recent) != len(sctx.sessdata.DBSCChallenges) {
-		sctx.sessdata.DBSCChallenges = recent
-		sctx.state = sessionDirty
+	if len(recent) != len(sctx.meta.DBSCChallenges) {
+		sctx.meta.DBSCChallenges = recent
+		sctx.metaDirty = true
 	}
 }
 
 func hasPendingDBSCRegistrationChallenge[T any](sctx *Session[T], now time.Time) bool {
-	pending := sctx.sessdata.DBSCRegistrationChallenge
+	pending := sctx.meta.DBSCRegistrationChallenge
 	return pending.Value != "" && pending.ExpiresAt.After(now)
 }
 
@@ -225,7 +226,7 @@ func isASCIIAlpha(c byte) bool {
 }
 
 // dbscSameOriginRequest reports whether a DBSC registration or refresh POST
-// should be accepted. Chrome's browser-process fetcher omits Sec-Fetch-*;
+// should be accepted. Chrome's browser-process fetcher omits Sec-Fetch-*.
 // only explicit cross-site or same-site values from a renderer are rejected.
 func dbscSameOriginRequest(r *http.Request) bool {
 	switch r.Header.Get("Sec-Fetch-Site") {

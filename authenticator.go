@@ -23,7 +23,7 @@ type Authenticator interface {
 }
 
 // hmacSHA256Authenticator authenticates with HMAC-SHA-256 and supports key
-// rotation. New authenticators use the current key; verification accepts the
+// rotation. New authenticators use the current key. Verification accepts the
 // current key or any configured previous key.
 type hmacSHA256Authenticator struct {
 	keys [][]byte
